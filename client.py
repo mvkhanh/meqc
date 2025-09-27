@@ -2,203 +2,133 @@
 import argparse
 import time
 import cv2
-import imagezmq, zmq
-from db.face_db import FaceDB
-from model.face_detector import HaarFaceDetector
-from model.face_recognizer import LBPFaceRecognizer
-from utils import enroll_from_camera, VideoSource
-from worker.recognize_worker import RecogWorker
+from multiprocessing import Process, Queue, Event
 from worker.detect_worker import DetectWorker
+from utils import submit, poll, create_sender
 
-def detection(args):
-    sender = imagezmq.ImageSender(connect_to=f"tcp://{args.server}:{args.port}", REQ_REP=True)
-    # cấu hình timeout cho REQ socket (ms)
-    sock = sender.zmq_socket
-    sock.setsockopt(zmq.LINGER, 0)           # không chờ khi close
-    sock.setsockopt(zmq.RCVTIMEO, 2000)      # 2s đợi reply từ server
-    sock.setsockopt(zmq.SNDTIMEO, 2000)      # 2s đợi gửi
-    print(f"[CLIENT] Connecting to tcp://{args.server}:{args.port}")
+class CaptureWorker(Process):
+    def __init__(self, in_q: Queue, width: int=640, height: int=640):
+        super().__init__(daemon=True)
+        self._stop = Event()
+        self.in_q = in_q
+        self.width = width
+        self.height = height
+        self.cam = None
+        
+    def run(self):
+        self.cam = cv2.VideoCapture(0)
+        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        try:
+            while not self._stop.is_set():
+                ok, frame_bgr = self.cam.read()
+                if not ok:
+                    time.sleep(0.02); continue
+                submit(self.in_q, frame_bgr)
+        finally:
+            self.cam.release()
+            
+    def stop(self):
+        self._stop.set()
+
+def _check_quit_key():
+    k = cv2.waitKey(1) & 0xFF
+    return k in (27, ord('q'), ord('Q'))
+
+def main(args):
+    if args.server:
+        sender = create_sender(args.server, args.port)
+        consecutive_fail = 0
+        MAX_FAILS = 3  # quÃ¡ 3 láº§n lá»i liÃªn tiáº¿p thÃ¬ dá»«ng
+        
+    else:
+        cv2.namedWindow('Streaming', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Streaming', width=args.width, height=args.height)
     
-    detector = HaarFaceDetector()
-    cam = VideoSource(args.width, args.height, args.fps, use_picam=args.use_picam)
-    recog_worker = DetectWorker(detector=detector, use_picam=args.use_picam, led_pins=args.led_pins,
-                               thresh=args.thresh, margin=args.margin, detect_every_n=args.den, quality=args.quality)
-    recog_worker.start()
+    in_q = Queue(maxsize=2)
+    out_q = Queue(maxsize=2)
+    capture_worker = CaptureWorker(in_q=in_q, width=args.width, height=args.height)
+    detect_worker = DetectWorker(detector_path=args.face_detection_model, detect_every_n=args.den,
+                                 face_score_thres=args.face_thres, agegender_path=args.agegender_model,
+                                 width=args.width, height=args.height, in_q=in_q, out_q=out_q,
+                                 emotion_path=args.emotion_model)
     
-    consecutive_fail = 0
-    MAX_FAILS = 3  # quá 3 lần lỗi liên tiếp thì dừng
-    
+    capture_worker.start()
+    detect_worker.start()
     try:
         while True:
-            ok, frame_bgr = cam.read()
-            if not ok:
-                time.sleep(0.02); continue
-            recog_worker.submit(frame_bgr)
-            
-            jpg = recog_worker.last_jpg
-            if jpg is None:
-                ok, tmp = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), args.quality])
-                jpg = tmp.tobytes() if ok else None
-            if jpg is None:
+            frame = poll(out_q)
+
+            # Chưa có frame mới -> đợi nhẹ rồi tiếp
+            if frame is None:
+                if args.server:
+                    time.sleep(0.02)
+                else:
+                    if _check_quit_key():
+                        break
                 continue
-            
-            try:
-                # sẽ raise ZMQError nếu server tắt / timeout
-                _ = sender.send_jpg(args.name, jpg)
-                consecutive_fail = 0  # reset khi gửi OK
-            except Exception as e:
-                consecutive_fail += 1
-                print(f"[CLIENT] send_jpg failed ({consecutive_fail}/{MAX_FAILS}): {e}")
-                if consecutive_fail >= MAX_FAILS:
-                    print("[CLIENT] Server unreachable. Stopping client.")
-                    break
-                # backoff nhẹ rồi thử lại, hoặc bạn có thể recreate socket
-                time.sleep(0.5)
-                # Option (recreate clean):
+
+            # ĐÃ có frame -> gửi hoặc hiển thị
+            if args.server:
+                ok, tmp = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), args.quality])
+                jpg = tmp.tobytes() if ok else None
+                if jpg is None:
+                    continue
+
                 try:
-                    sender.zmq_socket.close(0)
-                    sender.zmq_context.term()
-                except Exception:
-                    pass
-                sender = imagezmq.ImageSender(connect_to=f"tcp://{args.server}:{args.port}", REQ_REP=True)
-                sock = sender.zmq_socket
-                sock.setsockopt(zmq.LINGER, 0)
-                sock.setsockopt(zmq.RCVTIMEO, 2000)
-                sock.setsockopt(zmq.SNDTIMEO, 2000)
+                    _ = sender.send_jpg(args.name, jpg)
+                    consecutive_fail = 0  # reset khi gửi OK
+                except Exception as e:
+                    consecutive_fail += 1
+                    print(f"[CLIENT] send_jpg failed ({consecutive_fail}/{MAX_FAILS}): {e}")
+                    if consecutive_fail >= MAX_FAILS:
+                        print("[CLIENT] Server unreachable. Stopping client.")
+                        break
+
+                    time.sleep(0.5)
+                    # Recreate socket
+                    try:
+                        sender.zmq_socket.close(0)
+                        sender.zmq_context.term()
+                    except Exception:
+                        pass
+                    sender = create_sender(args.server, args.port)
+            else:
+                cv2.imshow('Streaming', frame)
+                if _check_quit_key():
+                    break
+                    
     except KeyboardInterrupt:
         pass
     finally:
-        cam.release()
-        try:
-            recog_worker.stop()
-        except Exception:
-            pass
-        # dọn ZMQ
-        try:
-            sender.zmq_socket.close(0)
-        except Exception:
-            pass
-        try:
-            sender.zmq_context.term()
-        except Exception:
-            pass
-
-def recognition(args):
-    sender = imagezmq.ImageSender(connect_to=f"tcp://{args.server}:{args.port}", REQ_REP=True)
-    # cấu hình timeout cho REQ socket (ms)
-    sock = sender.zmq_socket
-    sock.setsockopt(zmq.LINGER, 0)           # không chờ khi close
-    sock.setsockopt(zmq.RCVTIMEO, 2000)      # 2s đợi reply từ server
-    sock.setsockopt(zmq.SNDTIMEO, 2000)      # 2s đợi gửi
-    print(f"[CLIENT] Connecting to tcp://{args.server}:{args.port}")
-    
-    detector = HaarFaceDetector()
-    recognizer = LBPFaceRecognizer()
-    db = FaceDB()
-    cam = VideoSource(args.width, args.height, args.fps, use_picam=args.use_picam)
-    recog_worker = RecogWorker(detector=detector, recognizer=recognizer, db=db, use_picam=args.use_picam, led_pins=args.led_pins,
-                               thresh=args.thresh, margin=args.margin, detect_every_n=args.den, quality=args.quality)
-    recog_worker.start()
-    
-    consecutive_fail = 0
-    MAX_FAILS = 3  # quá 3 lần lỗi liên tiếp thì dừng
-    
-    try:
-        while True:
-            ok, frame_bgr = cam.read()
-            if not ok:
-                time.sleep(0.02); continue
-            recog_worker.submit(frame_bgr)
-            
-            jpg = recog_worker.last_jpg
-            if jpg is None:
-                ok, tmp = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), args.quality])
-                jpg = tmp.tobytes() if ok else None
-            if jpg is None:
-                continue
-            
+        if args.server:
             try:
-                # sẽ raise ZMQError nếu server tắt / timeout
-                _ = sender.send_jpg(args.name, jpg)
-                consecutive_fail = 0  # reset khi gửi OK
-            except Exception as e:
-                consecutive_fail += 1
-                print(f"[CLIENT] send_jpg failed ({consecutive_fail}/{MAX_FAILS}): {e}")
-                if consecutive_fail >= MAX_FAILS:
-                    print("[CLIENT] Server unreachable. Stopping client.")
-                    break
-                # backoff nhẹ rồi thử lại, hoặc bạn có thể recreate socket
-                time.sleep(0.5)
-                # Option (recreate clean):
-                try:
-                    sender.zmq_socket.close(0)
-                    sender.zmq_context.term()
-                except Exception:
-                    pass
-                sender = imagezmq.ImageSender(connect_to=f"tcp://{args.server}:{args.port}", REQ_REP=True)
-                sock = sender.zmq_socket
-                sock.setsockopt(zmq.LINGER, 0)
-                sock.setsockopt(zmq.RCVTIMEO, 2000)
-                sock.setsockopt(zmq.SNDTIMEO, 2000)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        cam.release()
-        try:
-            recog_worker.stop()
-        except Exception:
-            pass
-        # dọn ZMQ
-        try:
-            sender.zmq_socket.close(0)
-        except Exception:
-            pass
-        try:
-            sender.zmq_context.term()
-        except Exception:
-            pass
+                sender.zmq_socket.close(0)
+            except Exception:
+                pass
+            try:
+                sender.zmq_context.term()
+            except Exception:
+                pass
+        else:
+            cv2.destroyAllWindows()
         
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="Raspberry Client")
+    parser = argparse.ArgumentParser(prog="Raspberry Pi 5 Realtime Client")
     
-    parser.add_argument("--server", help="IP/host của PC server")
+    parser.add_argument("--server", default="", help="IP/host cua PC server, bo trong de hien thi local")
     parser.add_argument("--port", type=int, default=9009)
     parser.add_argument("--name", default="pi")
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--quality", type=int, default=80)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--den", type=int, default=3, help="detect_every_n")
-    parser.add_argument("--use-cam", dest='use_picam', action="store_false", help="Dùng cam laptop trong trường hợp không có pi", default=True)
-    parser.add_argument("--fps", type=int, default=15, help="FPS khi dùng cam laptop")
-    parser.add_argument('--led-pins', type=lambda s: list(map(lambda x: int(x.strip()), s.split(','))), help='Ví dụ: 1,2,3')
-    
-    sub = parser.add_subparsers(dest="mode", required=True)
-    
-    pc = sub.add_parser("recognition", help="Chạy recognition")
-    pc.add_argument("--thresh", type=float, default=0.6, help="Chi-square threshold for LBP (try 0.55..0.70)")
-    pc.add_argument("--margin", type=float, default=0.02)
-    pc.add_argument("--enroll-from-camera", type=str, default=None, help="Tên người để enroll từ camera.")
-    pc.add_argument("--num", type=int, default=15, help="Số mẫu khi enroll từ camera")
-    
-    pd = sub.add_parser("detection", help="Chạy detection")
-    args = parser.parse_args()
+    parser.add_argument("--quality", type=int, default=80, help='Image quality when send to server')
+    parser.add_argument("--face-thres", type=float, default=0.8, help='Threshold for face detection')
+    parser.add_argument("--face-detection-model", default='ckpt/face_detection_yunet_2023mar.onnx', help="Tham so cua yunet")
+    parser.add_argument("--emotion-model", default='ckpt/icml_emotion.b1.onnx', help="Tham so cua emotion")
+    parser.add_argument("--agegender-model", default='ckpt/agegender_best.b1.onnx', help="Tham so cua age gender")
+    # parser.add_argument("--gaze-model", default='ckpt/resnet34_gaze.opset17.onnx', help="Tham so cua gaze")
 
-    if args.mode == 'recognition':
-        if args.enroll_from_camera:
-            enroll_from_camera(args.enroll_from_camera, args.num, args.width, args.height, args.fps, args.use_picam)
-        elif args.server:
-            recognition(args)
-        else:
-            print('Chưa nhập IP server!')
-            
-    elif args.mode == 'detection':
-        if args.server:
-            detection(args)
-        else:
-            print('Chưa nhập IP server!')
-    if args.use_picam:
-        import RPi.GPIO as GPIO
-        GPIO.setmode(GPIO.BCM)
-        for led in args.led_pins:
-            GPIO.setup(led, GPIO.OUT) #led
-            GPIO.output(led, GPIO.LOW)
+    args = parser.parse_args()
+      
+    main(args)
