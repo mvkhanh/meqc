@@ -192,9 +192,6 @@ class DetectWorker(Process):
             t0 = time()
             if need_detect:
                 boxes = self.detector.detect(frame_bgr) or []
-                t1 = time()
-                if t1 > t0:
-                    print(f"Yunet FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
                 best = self._largest_box(boxes)
                 if best is not None:
                     x, y, w, h = self._clamp_box(best, W, H)
@@ -210,6 +207,9 @@ class DetectWorker(Process):
 
             # Luôn vẽ overlay từ kết quả chung (nếu có)
             out = self._draw_overlay(frame_bgr)
+            t1 = time()
+            if t1 > t0:
+                print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
             submit(self.out_q, out)
             self.frame_idx += 1
 
