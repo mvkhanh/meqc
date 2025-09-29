@@ -19,6 +19,7 @@ class CaptureWorker(Process):
         self.cam = cv2.VideoCapture(0)
         self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # print(f"FPS: {self.cam.get(cv2.CAP_PROP_FPS)}")
         try:
             while not self._stop.is_set():
                 ok, frame_bgr = self.cam.read()
@@ -45,8 +46,8 @@ def main(args):
         cv2.namedWindow('Streaming', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Streaming', width=args.width, height=args.height)
     
-    in_q = Queue(maxsize=2)
-    out_q = Queue(maxsize=2)
+    in_q = Queue(maxsize=1)
+    out_q = Queue(maxsize=1)
     capture_worker = CaptureWorker(in_q=in_q, width=args.width, height=args.height)
     detect_worker = DetectWorker(detector_path=args.face_detection_model, detect_every_n=args.den,
                                  face_score_thres=args.face_thres, agegender_path=args.agegender_model,

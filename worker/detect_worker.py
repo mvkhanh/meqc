@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 import cv2
 from utils import submit, poll
+from time import time
 
 class DetectWorker(Process):
     """
@@ -30,11 +31,6 @@ class DetectWorker(Process):
         self.emotion_path = emotion_path
         self.emotion = None
 
-    # ----- Child process lifecycle -----
-    def _init_in_child(self):
-        # Construct heavy objects in child process
-        self.detector = self.detector_cls()
-
     def run(self):
         self.detector = YuNetFaceDetector(model_path=self.detector_path, face_score_thres=self.face_score_thres,
                                           width=self.width, height=self.height)
@@ -45,7 +41,7 @@ class DetectWorker(Process):
             frame = poll(self.in_q)
             if frame is None:
                 continue
-
+            
             out = self.annotate_and_encode(frame, frame_idx=self.frame_idx, static=static)
             self.frame_idx += 1
 
@@ -66,11 +62,12 @@ class DetectWorker(Process):
 
         # Chỉ detect lại theo chu kỳ hoặc khi chưa có boxes
         need_detect = (frame_idx % self.detect_every_n == 0) or (not static.get("boxes"))
-
+        start = time()
         if need_detect:
             # 1) Face detection (YuNet)
             boxes = self.detector.detect(frame_bgr) or []
-
+            t1 = time()
+            print(f"Yunet FPS: {1 / (t1 - start)} - Inference time: {t1 - start}s")
             # 2) Age/Gender cho từng bbox
             attrs = []
             H, W = frame_bgr.shape[:2]
@@ -85,6 +82,8 @@ class DetectWorker(Process):
                 face_crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
                 try:
                     age_years, gender_label, gender_conf = self.agegender.detect(face_crop_rgb)
+                    t2 = time()
+                    print(f"Age Gender FPS: {1 / (t2 - t1)} - Inference time: {t2 - t1}s")
                 except Exception:
                     age_years, gender_label, gender_conf = None, None, None
                 # Emotion
@@ -92,6 +91,8 @@ class DetectWorker(Process):
                 if self.emotion is not None:
                     try:
                         emo_label, emo_conf = self.emotion.detect(face_crop_rgb)
+                        t3 = time()
+                        print(f"Emotion FPS: {1 / (t3 - t2)} - Inference time: {t3 - t2}")
                     except Exception:
                         emo_label, emo_conf = None, None
                 attrs.append((age_years, gender_label, gender_conf, emo_label, emo_conf))
