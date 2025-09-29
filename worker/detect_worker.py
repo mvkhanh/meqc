@@ -55,8 +55,7 @@ class DetectWorker(Process):
                 sleep(0.005)
                 continue
             try:
-                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                age_years, gender_label, gender_conf = self.agegender.detect(face_rgb)
+                age_years, gender_label, gender_conf = self.agegender.detect(face)
             except Exception:
                 age_years, gender_label, gender_conf = None, None, None
 
@@ -82,8 +81,7 @@ class DetectWorker(Process):
                 sleep(0.005)
                 continue
             try:
-                face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-                emo_label, emo_conf = self.emotion.detect(face_rgb)
+                emo_label, emo_conf = self.emotion.detect(face)
             except Exception:
                 emo_label, emo_conf = None, None
 
@@ -198,7 +196,7 @@ class DetectWorker(Process):
                     if w >= 16 and h >= 16:
                         face_crop = frame_bgr[y:y + h, x:x + w]
                         with self.shared["lock"]:
-                            self.shared["latest_face"] = face_crop.copy()
+                            self.shared["latest_face"] = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
                             self.shared["face_ver"] += 1
                             self.shared["last_box"] = (x, y, w, h)
                 else:
