@@ -237,7 +237,7 @@ class HailoInferProc(Process):
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    job = cmodel.run_async([bindings], partial(self._cb, bindings))
+                    job = cmodel.run_async([bindings], partial(self._cb, bindings=bindings))
                     job.wait(self.timeout_ms)
 
                     out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
