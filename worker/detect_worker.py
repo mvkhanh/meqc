@@ -27,15 +27,34 @@ def io_shape(im, is_input, name):
         return (im.output(name).shape if name is not None else im.output().shape)
 
 def get_io_fmt(io_obj):
-    return io_obj.get_format_type() if hasattr(io_obj, "get_format_type") else None
+    # Trả về enum hoặc None
+    if hasattr(io_obj, "get_format_type"):
+        try:
+            return io_obj.get_format_type()
+        except Exception:
+            pass
+    return getattr(io_obj, "format_type", None)
 
 def fmt_to_dtype(fmt):
-    return {
-        FormatType.UINT8:   np.uint8,
-        FormatType.INT8:    np.int8,
-        FormatType.FLOAT16: np.float16,
-        FormatType.FLOAT32: np.float32,
-    }.get(fmt, np.uint8)  # fallback an toàn
+    # Không đụng trực tiếp FormatType.INT8/... vì có bản không có
+    if fmt is None:
+        return np.uint8
+    name = None
+    if hasattr(fmt, "name"):
+        name = fmt.name
+    else:
+        name = str(fmt)  # ví dụ 'FormatType.UINT8' hoặc 'UINT8'
+    name = name.upper()
+    if "UINT8" in name:
+        return np.uint8
+    if "INT8" in name:
+        return np.int8
+    if "FLOAT16" in name or "FP16" in name:
+        return np.float16
+    if "FLOAT32" in name or "FP32" in name:
+        return np.float32
+    # AUTO/UNKNOWN -> mặc định UINT8 (thường đúng với HEF quantized)
+    return np.uint8
 
 def io_set_format(im, is_input, name, fmt):
     """Set format type cho input/output (từng tên)."""
@@ -95,7 +114,7 @@ class HailoInferProc(Process):
         print(f'{self.model_type} - {face_rgb.shape} - {expected_shape}')
         H, W = expected_shape[0], expected_shape[1]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        img = np.expand_dims(img, 0)  # (1,H,W,3)
+        # img = np.expand_dims(img, 0)  # (1,H,W,3)
         return img
 
     def _postprocess(self, out_arrs):
