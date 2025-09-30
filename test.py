@@ -11,7 +11,6 @@ def list_input_names(im):
     """Trả về list tên input. Có fallback cho API khác nhau."""
     return [x.name for x in im.inputs]   # list of objects
 
-
 def list_output_names(im):
     """Trả về list tên output. Có fallback cho API khác nhau."""
     return [x.name for x in im.outputs]
