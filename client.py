@@ -126,8 +126,8 @@ if __name__ == "__main__":
     parser.add_argument("--quality", type=int, default=80, help='Image quality when send to server')
     parser.add_argument("--face-thres", type=float, default=0.8, help='Threshold for face detection')
     parser.add_argument("--face-detection-model", default='ckpt/face_detection_yunet_2023mar.onnx', help="Tham so cua yunet")
-    parser.add_argument("--emotion-model", default='ckpt/icml_emotion.b1.onnx', help="Tham so cua emotion")
-    parser.add_argument("--agegender-model", default='ckpt/agegender_best.b1.onnx', help="Tham so cua age gender")
+    parser.add_argument("--emotion-model", default='ckpt/emotion.hef', help="Tham so cua emotion")
+    parser.add_argument("--agegender-model", default='ckpt/agegender.hef', help="Tham so cua age gender")
     # parser.add_argument("--gaze-model", default='ckpt/resnet34_gaze.opset17.onnx', help="Tham so cua gaze")
 
     args = parser.parse_args()

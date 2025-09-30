@@ -1,6 +1,4 @@
-from model.face_detector import YuNetFaceDetector
-from model.agegender_recognizer import AgeGenderRecognizer
-from model.emotion_recognizer import EmotionRecognizer
+import os
 from multiprocessing import Process, Queue, Event
 from typing import Optional
 import numpy as np
@@ -8,6 +6,153 @@ import cv2
 from utils import submit, poll
 from time import time, sleep
 from threading import Thread, Lock
+from model.face_detector import YuNetFaceDetector
+
+# ---- NEW: Hailo imports ----
+try:
+    from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
+except Exception:
+    VDevice = None  # allow file to import on machines without Hailo
+
+
+class HailoInferProc(Process):
+    """
+    A dedicated *process* that owns a Hailo VDevice and runs exactly one HEF model.
+    Use multi_process_service + shared group_id so multiple processes share the same Hailo8.
+    It receives RGB face crops on in_q and returns parsed results on out_q.
+    model_type: 'agegender' | 'emotion'
+    """
+    def __init__(self, hef_path: str, model_type: str, in_q: Queue, out_q: Queue,
+                 group_id: str = "SHARED", timeout_ms: int = 10000):
+        super().__init__(daemon=True)
+        self.hef_path = hef_path
+        self.model_type = model_type
+        self.in_q = in_q
+        self.out_q = out_q
+        self.group_id = group_id
+        self.timeout_ms = timeout_ms
+        self._stop = Event()
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _softmax(x: np.ndarray) -> np.ndarray:
+        x = x.astype(np.float32)
+        x = x - np.max(x)
+        e = np.exp(x)
+        s = e / (np.sum(e) + 1e-9)
+        return s
+    # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
+    @staticmethod
+    def _prep(face_rgb: np.ndarray, input_shape: tuple) -> np.ndarray:
+        """Prepare input tensor based on input_shape: supports NHWC or NCHW.
+        Returned dtype float32 in range [0,1]."""
+        # Expected shape includes batch dim
+        if len(input_shape) != 4:
+            raise RuntimeError(f"Unsupported input shape: {input_shape}")
+        n, a, b, c = input_shape
+        # NHWC if last dim is 3, else NCHW
+        if c == 3:  # NHWC
+            H, W = a, b
+            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+            img = img.astype(np.float32)
+            img = np.expand_dims(img, 0)  # (1,H,W,3)
+        else:
+            raise RuntimeError(f"Can't infer layout from shape: {input_shape}")
+        return img
+
+    def _postprocess(self, out_arrs):
+        """Best-effort postprocess for demo; adjust to your HEF's real outputs.
+        out_arrs: list[np.ndarray] (one or more outputs).
+        Returns a dict depending on model_type.
+        """
+        if self.model_type == 'emotion':
+            # Assume logits vector for 7 emotions
+            EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+            vec = out_arrs[0].reshape(-1)
+            if vec.size == 0:
+                return {"emotion": None, "emotion_conf": None}
+            prob = self._softmax(vec)
+            idx = int(prob.argmax())
+            conf = float(prob[idx])
+            label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
+            return {"emotion": label, "emotion_conf": conf}
+        else:  # agegender
+            g = float(np.asarray(out_arrs[1]).squeeze())
+            age_raw = float(np.asarray(out_arrs[0]).squeeze())
+            prob_female = 1.0 / (1.0 + np.exp(-g))
+            if prob_female >= 0.5:
+                gender_label = "Female"
+                gender_conf = prob_female
+            else:
+                gender_label = "Male"
+                gender_conf = 1.0 - prob_female
+            age_years = float(np.clip(age_raw, 0, 100))
+
+            return {"age": age_years, "gender": gender_label, "gender_conf": gender_conf}
+
+    # Dummy callback required by run_async
+    @staticmethod
+    def _cb(completion_info, bindings):
+        # No-op; sync read via bindings.output().get_buffer()
+        return
+
+    def run(self):
+        if VDevice is None:
+            # Hailo SDK not available; drain queue and return None results
+            while True:
+                item = self.in_q.get()
+                if item is None:
+                    break
+                self.out_q.put({})
+            return
+
+        params = VDevice.create_params()
+        params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+        params.group_id = self.group_id
+        params.multi_process_service = True
+
+        with VDevice(params) as vdevice:
+            infer_model = vdevice.create_infer_model(self.hef_path)
+            infer_model.set_batch_size(1)
+            # Try to ensure float32 pipeline; ignore if unsupported
+            try:
+                infer_model.input().set_format_type(FormatType.FLOAT32)
+                infer_model.output().set_format_type(FormatType.FLOAT32)
+            except Exception:
+                pass
+
+            with infer_model.configure() as configured:
+                while True:
+                    face = self.in_q.get()
+                    if face is None:
+                        break
+                    try:
+                        inp = self._prep(face, infer_model.input().shape)
+                    except Exception:
+                        # fallback naive NHWC 224x224
+                        print('Fallback preprocess')
+                        img = cv2.resize(face, (224, 224)).astype(np.float32) / 255.0
+                        inp = np.expand_dims(img, 0)
+
+                    # Bindings
+                    bindings = configured.create_bindings()
+                    bindings.input().set_buffer(inp)
+
+                    # Handle one-output by default; try to support multi-outputs as contiguous buffer if needed
+                    out_shape = infer_model.output().shape
+                    out_buf = np.empty(out_shape, dtype=np.float32)
+                    bindings.output().set_buffer(out_buf)
+
+                    configured.wait_for_async_ready(timeout_ms=self.timeout_ms)
+                    job = configured.run_async([bindings], lambda completion_info, b=bindings: self._cb(completion_info, b))
+                    job.wait(self.timeout_ms)
+
+                    # Read outputs (single output path)
+                    out_arrs = [bindings.output().get_buffer()]
+
+                    # Parse & push
+                    result = self._postprocess(out_arrs)
+                    self.out_q.put(result)
 
 
 class DetectWorker(Process):
@@ -15,7 +160,7 @@ class DetectWorker(Process):
     Multiprocessing worker:
       - Nhận frame qua in_q
       - YuNet chỉ phát hiện khuôn mặt lớn nhất -> lưu crop vào biến dùng chung
-      - Hai luồng nền chạy song song: Age/Gender và Emotion, đọc crop chung để suy luận
+      - Hai *process* Hailo (Age/Gender và Emotion) chạy song song, đọc crop chung để suy luận
       - Kết quả (age, gender, emotion) được lưu vào dict chung
       - Vẽ kết quả lên frame và gửi ra out_q
     """
@@ -25,12 +170,10 @@ class DetectWorker(Process):
         super().__init__(daemon=True)
         self.detect_every_n = detect_every_n
         self.detector = None
-        self.agegender = None
-        self.emotion = None
-
         self.detector_path = detector_path
-        self.agegender_path = agegender_path
-        self.emotion_path = emotion_path
+        # self.agegender / self.emotion (ONNX) are removed; replaced by Hailo processes
+        self.agegender_path = agegender_path  # expecting .hef
+        self.emotion_path = emotion_path      # expecting .hef
 
         self.face_score_thres = face_score_thres
         self.width = width
@@ -40,58 +183,18 @@ class DetectWorker(Process):
         self.frame_idx = 0
         self._stop = Event()
 
-        # Biến chia sẻ giữa các luồng trong cùng Process
+        # Shared state inside this process
         self.shared = None
 
-    # -------------------- Luồng nền cho Age/Gender --------------------
-    def _agegender_loop(self):
-        last_ver = -1
-        while not self._stop.is_set():
-            # Lấy ảnh khuôn mặt mới nhất nếu có phiên bản mới
-            with self.shared["lock"]:
-                ver = self.shared["face_ver"]
-                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
-            if face is None:
-                sleep(0.005)
-                continue
-            try:
-                age_years, gender_label, gender_conf = self.agegender.detect(face)
-            except Exception:
-                age_years, gender_label, gender_conf = None, None, None
+        # IPC queues to Hailo processes
+        self._ag_in = None
+        self._ag_out = None
+        self._emo_in = None
+        self._emo_out = None
 
-            with self.shared["lock"]:
-                res = self.shared["result"]
-                res["age"] = age_years
-                res["gender"] = gender_label
-                res["gender_conf"] = gender_conf
-                res["ts"] = time()
-            last_ver = ver
-        # end while
-
-    # -------------------- Luồng nền cho Emotion --------------------
-    def _emotion_loop(self):
-        if self.emotion is None:
-            return
-        last_ver = -1
-        while not self._stop.is_set():
-            with self.shared["lock"]:
-                ver = self.shared["face_ver"]
-                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
-            if face is None:
-                sleep(0.005)
-                continue
-            try:
-                emo_label, emo_conf = self.emotion.detect(face)
-            except Exception:
-                emo_label, emo_conf = None, None
-
-            with self.shared["lock"]:
-                res = self.shared["result"]
-                res["emotion"] = emo_label
-                res["emotion_conf"] = emo_conf
-                res["ts"] = time()
-            last_ver = ver
-        # end while
+        # Hailo subprocess handles
+        self._ag_proc = None
+        self._emo_proc = None
 
     # -------------------- Helper --------------------
     @staticmethod
@@ -149,14 +252,64 @@ class DetectWorker(Process):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
         return frame_bgr
 
+    def _agegender_loop(self):
+        if self._ag_in is None or self._ag_out is None:
+            return
+        last_ver = -1
+        from queue import Empty
+        while not self._stop.is_set():
+            with self.shared["lock"]:
+                ver = self.shared["face_ver"]
+                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
+            if face is not None:
+                submit(self._ag_in, face)
+                last_ver = ver
+            # Non-blocking fetch result
+            try:
+                res = self._ag_out.get_nowait()
+                with self.shared["lock"]:
+                    dst = self.shared["result"]
+                    dst["age"] = res.get("age")
+                    dst["gender"] = res.get("gender")
+                    dst["gender_conf"] = res.get("gender_conf")
+                    dst["ts"] = time()
+            except Empty:
+                pass
+            sleep(0.003)
+
+    def _emotion_loop(self):
+        if self._emo_in is None or self._emo_out is None:
+            return
+        last_ver = -1
+        from queue import Empty
+        while not self._stop.is_set():
+            with self.shared["lock"]:
+                ver = self.shared["face_ver"]
+                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
+            if face is not None:
+                submit(self._emo_in, face)
+                last_ver = ver
+            # Non-blocking fetch result
+            try:
+                res = self._emo_out.get_nowait()
+                with self.shared["lock"]:
+                    dst = self.shared["result"]
+                    dst["emotion"] = res.get("emotion")
+                    dst["emotion_conf"] = res.get("emotion_conf")
+                    dst["ts"] = time()
+            except Empty:
+                pass
+            sleep(0.003)
+
     # -------------------- Main process loop --------------------
     def run(self):
+        # Shared state inside this (DetectWorker) process
         self.shared = {
             "lock": Lock(),
-            "latest_face": None,   # numpy BGR crop
-            "face_ver": 0,         # tăng mỗi khi có crop mới
-            "last_box": None,      # (x,y,w,h) của khuôn mặt lớn nhất lần detect gần nhất
-            "result": {            # Kết quả tổng hợp để YuNet vẽ lên frame
+            "latest_face": None,   # numpy RGB crop
+            "face_ver": 0,
+            "last_box": None,      # (x,y,w,h)
+            "result": {
                 "age": None,
                 "gender": None,
                 "gender_conf": None,
@@ -165,21 +318,35 @@ class DetectWorker(Process):
                 "ts": 0.0
             }
         }
-        # Load models
+
         self.detector = YuNetFaceDetector(model_path=self.detector_path, face_score_thres=self.face_score_thres,
                                           width=self.width, height=self.height)
-        self.agegender = AgeGenderRecognizer(model_path=self.agegender_path)
-        self.emotion = EmotionRecognizer(model_path=self.emotion_path) if self.emotion_path else None
 
-        # Start background threads
+        # Spawn Hailo subprocesses (one per model) with a shared group id so they share the same Hailo8
+        GROUP_ID = "SHARED"  # can be parameterized
+        if os.path.exists(self.agegender_path):
+            self._ag_in, self._ag_out = Queue(maxsize=1), Queue(maxsize=1)
+            self._ag_proc = HailoInferProc(self.agegender_path, 'agegender', self._ag_in, self._ag_out, GROUP_ID)
+            self._ag_proc.start()
+        else:    
+            raise FileNotFoundError(f'Not found {self.agegender_path}')
+        
+        if os.path.exists(self.emotion_path):
+            self._emo_in, self._emo_out = Queue(maxsize=1), Queue(maxsize=1)
+            self._emo_proc = HailoInferProc(self.emotion_path, 'emotion', self._emo_in, self._emo_out, GROUP_ID)
+            self._emo_proc.start()
+        else:
+            raise FileNotFoundError(f'Not found {self.emotion_path}')
+
+        # Background threads that feed face crops to the subprocesses and pull results back
         ag_thread = Thread(target=self._agegender_loop, daemon=True)
-        ag_thread.start()
-        em_thread = None
-        if self.emotion is not None:
-            em_thread = Thread(target=self._emotion_loop, daemon=True)
+        if self._ag_proc is not None:
+            ag_thread.start()
+        em_thread = Thread(target=self._emotion_loop, daemon=True)
+        if self._emo_proc is not None:
             em_thread.start()
 
-        # Main loop: nhận frame, (định kỳ) detect -> cập nhật crop + vẽ overlay
+        # Main loop: receive frame, (periodically) detect -> update crop + draw overlay
         while not self._stop.is_set():
             frame_bgr = poll(self.in_q)
             if frame_bgr is None:
@@ -196,6 +363,7 @@ class DetectWorker(Process):
                     if w >= 16 and h >= 16:
                         face_crop = frame_bgr[y:y + h, x:x + w]
                         with self.shared["lock"]:
+                            # Store as RGB for recognizers
                             self.shared["latest_face"] = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
                             self.shared["face_ver"] += 1
                             self.shared["last_box"] = (x, y, w, h)
@@ -203,7 +371,7 @@ class DetectWorker(Process):
                     with self.shared["lock"]:
                         self.shared["last_box"] = None
 
-            # Luôn vẽ overlay từ kết quả chung (nếu có)
+            # Always draw overlay from shared results
             out = self._draw_overlay(frame_bgr)
             t1 = time()
             if t1 > t0:
@@ -211,15 +379,37 @@ class DetectWorker(Process):
             submit(self.out_q, out)
             self.frame_idx += 1
 
-        # Kết thúc
+        # Cleanup
         try:
             if ag_thread.is_alive():
                 ag_thread.join(timeout=0.1)
         except Exception:
             pass
         try:
-            if em_thread is not None and em_thread.is_alive():
+            if em_thread.is_alive():
                 em_thread.join(timeout=0.1)
+        except Exception:
+            pass
+
+        # Tell subprocesses to stop
+        try:
+            if self._ag_in is not None:
+                self._ag_in.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            if self._emo_in is not None:
+                self._emo_in.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            if self._ag_proc is not None:
+                self._ag_proc.join(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if self._emo_proc is not None:
+                self._emo_proc.join(timeout=0.5)
         except Exception:
             pass
 
