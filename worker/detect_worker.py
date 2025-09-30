@@ -29,7 +29,7 @@ def io_shape(im, is_input, name):
 def get_io_fmt(io_obj):
     # Trả về enum hoặc None
     if hasattr(io_obj, "get_format_type"):
-        try:
+        try: 
             return io_obj.get_format_type()
         except Exception:
             pass
@@ -38,7 +38,7 @@ def get_io_fmt(io_obj):
 def fmt_to_dtype(fmt):
     # Không đụng trực tiếp FormatType.INT8/... vì có bản không có
     if fmt is None:
-        return np.int8
+        return np.uint8
     name = None
     if hasattr(fmt, "name"):
         name = fmt.name
@@ -261,7 +261,7 @@ class HailoInferProc(Process):
                         out_fmt   = get_io_fmt(out_io)
                         out_dtype = fmt_to_dtype(out_fmt)
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.float32)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
