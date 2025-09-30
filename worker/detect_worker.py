@@ -68,18 +68,13 @@ class HailoInferProc(Process):
         return s
     
     @staticmethod
-    def softmax_np(x, axis=1):
-        x = x - np.max(x, axis=axis, keepdims=True); e = np.exp(x)
-        return e / (np.sum(e, axis=axis, keepdims=True) + 1e-9)
-    
-    @staticmethod
     def decode_gaze3Gaze_bins(pitch_logits, yaw_logits):
         GAZE_BINS = 90
         GAZE_BINWIDTH = 4.0
         GAZE_ANGLE = 180.0
         idx = np.arange(GAZE_BINS, dtype=np.float32)[None, :]
-        p_pitch = HailoInferProc.softmax_np(pitch_logits, axis=1)
-        p_yaw = HailoInferProc.softmax_np(yaw_logits, axis=1)
+        p_pitch = HailoInferProc._softmax(pitch_logits, axis=1)
+        p_yaw = HailoInferProc._softmax(yaw_logits, axis=1)
         pitch_deg = float(np.sum(p_pitch * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         yaw_deg = float(np.sum(p_yaw * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         return yaw_deg, pitch_deg
