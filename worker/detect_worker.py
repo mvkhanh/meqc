@@ -27,15 +27,34 @@ def io_shape(im, is_input, name):
         return (im.output(name).shape if name is not None else im.output().shape)
 
 def get_io_fmt(io_obj):
-    return io_obj.get_format_type() if hasattr(io_obj, "get_format_type") else None
+    # Trả về enum hoặc None
+    if hasattr(io_obj, "get_format_type"):
+        try:
+            return io_obj.get_format_type()
+        except Exception:
+            pass
+    return getattr(io_obj, "format_type", None)
 
 def fmt_to_dtype(fmt):
-    return {
-        FormatType.UINT8:   np.uint8,
-        FormatType.INT8:    np.int8,
-        FormatType.FLOAT16: np.float16,
-        FormatType.FLOAT32: np.float32,
-    }.get(fmt, np.uint8)  # fallback an toàn
+    # Không đụng trực tiếp FormatType.INT8/... vì có bản không có
+    if fmt is None:
+        return np.uint8
+    name = None
+    if hasattr(fmt, "name"):
+        name = fmt.name
+    else:
+        name = str(fmt)  # ví dụ 'FormatType.UINT8' hoặc 'UINT8'
+    name = name.upper()
+    if "UINT8" in name:
+        return np.uint8
+    if "INT8" in name:
+        return np.int8
+    if "FLOAT16" in name or "FP16" in name:
+        return np.float16
+    if "FLOAT32" in name or "FP32" in name:
+        return np.float32
+    # AUTO/UNKNOWN -> mặc định UINT8 (thường đúng với HEF quantized)
+    return np.uint8
 
 def io_set_format(im, is_input, name, fmt):
     """Set format type cho input/output (từng tên)."""
@@ -90,13 +109,74 @@ class HailoInferProc(Process):
         return s
     
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
-    def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
-        """Chuẩn hoá input theo expected_shape (NCHW hoặc NHWC). Trả float32."""
-        print(f'{self.model_type} - {face_rgb.shape} - {expected_shape}')
-        H, W = expected_shape[0], expected_shape[1]
-        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        img = np.expand_dims(img, 0)  # (1,H,W,3)
-        return img
+    def _prep(self, face_rgb: np.ndarray, expected_shape, dtype) -> np.ndarray:
+        """
+        Trả về buffer đúng y 'expected_shape' của infer_model.input(name).shape
+        và đúng dtype (uint8/float32...). Không tự động thêm batch khi không có.
+        """
+        es = tuple(int(x) for x in expected_shape)
+        if len(es) == 3:
+            # 3D: HWC hoặc CHW
+            if es[2] in (1, 3):  # HWC
+                H, W, C = es
+                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+                if C == 1:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
+                if np.issubdtype(dtype, np.integer):
+                    buf = img.astype(dtype)
+                else:
+                    buf = (img.astype(np.float32) / 255.0).astype(dtype)
+                assert buf.shape == es, f"prep HWC mismatch: got {buf.shape}, expect {es}"
+                return buf.copy(order="C")
+
+            if es[0] in (1, 3):  # CHW
+                C, H, W = es
+                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+                if C == 1:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    img = img[:, :, None]
+                if np.issubdtype(dtype, np.integer):
+                    buf = np.transpose(img.astype(dtype), (2, 0, 1))
+                else:
+                    buf = np.transpose((img.astype(np.float32)/255.0).astype(dtype), (2, 0, 1))
+                assert buf.shape == es, f"prep CHW mismatch: got {buf.shape}, expect {es}"
+                return buf.copy(order="C")
+
+            raise ValueError(f"Unknown 3D layout for expected_shape={es}")
+
+        elif len(es) == 4:
+            # 4D: NHWC (N,H,W,C) hoặc NCHW (N,C,H,W)
+            if es[-1] in (1, 3):  # NHWC
+                N, H, W, C = es
+                assert N == 1, "Stream hiện tại giả định batch=1"
+                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+                if C == 1:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
+                if np.issubdtype(dtype, np.integer):
+                    buf = img.astype(dtype)[None, ...]
+                else:
+                    buf = (img.astype(np.float32)/255.0).astype(dtype)[None, ...]
+                assert buf.shape == es, f"prep NHWC mismatch: got {buf.shape}, expect {es}"
+                return buf.copy(order="C")
+
+            if es[1] in (1, 3):  # NCHW
+                N, C, H, W = es
+                assert N == 1, "Stream hiện tại giả định batch=1"
+                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+                if C == 1:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    img = img[:, :, None]
+                if np.issubdtype(dtype, np.integer):
+                    buf = np.transpose(img.astype(dtype), (2, 0, 1))[None, ...]
+                else:
+                    buf = np.transpose((img.astype(np.float32)/255.0).astype(dtype), (2, 0, 1))[None, ...]
+                assert buf.shape == es, f"prep NCHW mismatch: got {buf.shape}, expect {es}"
+                return buf.copy(order="C")
+
+            raise ValueError(f"Unknown 4D layout for expected_shape={es}")
+
+        else:
+            raise ValueError(f"Unsupported rank for expected_shape={es}")
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -147,45 +227,51 @@ class HailoInferProc(Process):
             input_names = list_input_names(infer_model)
             output_names = list_output_names(infer_model)
 
+            # KHÔNG ép:
+            # for n in input_names:  io_set_format(infer_model, True, n, FormatType.FLOAT32)
+            # for n in output_names: io_set_format(infer_model, False, n, FormatType.FLOAT32)
+            for n in input_names:
+                shp = io_shape(infer_model, True, n)
+                fmt = get_io_fmt(infer_model.input(n))
+                print(f"[INPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
+            for n in output_names:
+                shp = io_shape(infer_model, False, n)
+                fmt = get_io_fmt(infer_model.output(n))
+                print(f"[OUTPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
             with infer_model.configure() as cmodel:
                 while True:
                     face = self.in_q.get()
                     if face is None:
                         break
 
-                    # Bindings
                     bindings = cmodel.create_bindings()
-                    
-                    # --- Inputs: tạo buffer đúng shape cho từng input name
+
+                    # Inputs
                     for n in input_names:
+                        in_io    = infer_model.input(n)
+                        in_fmt   = get_io_fmt(in_io)
+                        in_dtype = fmt_to_dtype(in_fmt)
                         in_shape = io_shape(infer_model, True, n)
-                        in_buf = self._prep(face, in_shape)
+                        in_buf   = self._prep(face, in_shape, in_dtype)
                         bindings_set_buffer(bindings, True, n, in_buf)
 
-                    # --- Outputs: cấp buffer cho tất cả outputs
+                    # Outputs
                     for n in output_names:
                         out_io    = infer_model.output(n)
                         out_fmt   = get_io_fmt(out_io)
-                        out_dtype = fmt_to_dtype(out_fmt)   # <- dùng dtype đúng
+                        out_dtype = fmt_to_dtype(out_fmt)
                         out_shape = io_shape(infer_model, False, n)
-
-                        out_buf = np.empty(out_shape, dtype=out_dtype)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    job = cmodel.run_async(
-                        [bindings],
-                        partial(HailoInferProc._cb, bindings=bindings)
-                    )
+                    job = cmodel.run_async([bindings], partial(HailoInferProc._cb, bindings=bindings))
                     job.wait(self.timeout_ms)
 
-                    # Read outputs (single output path)
-                    out_arrs = [bindings.output().get_buffer()]
-                    
-                    # Parse & push
+                    out_arrs = [bindings_get_buffer(bindings, n) for n in output_names]
+                    # Cast sang float32 trong postprocess nếu cần:
                     result = self._postprocess(out_arrs)
                     self.out_q.put(result)
-
 
 class DetectWorker(Process):
     """
