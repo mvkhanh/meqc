@@ -86,7 +86,7 @@ class HailoInferProc(Process):
         H, W = expected_shape[0], expected_shape[1]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
         img = np.expand_dims(img, 0)  # (1,H,W,3)
-        return img.astype(np.float32)
+        return img
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
