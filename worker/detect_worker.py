@@ -114,7 +114,7 @@ class HailoInferProc(Process):
         print(f'{self.model_type} - {face_rgb.shape} - {expected_shape}')
         H, W = expected_shape[0], expected_shape[1]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        # img = np.expand_dims(img, 0)  # (1,H,W,3)
+        img = np.expand_dims(img, 0)  # (1,H,W,3)
         return img
 
     def _postprocess(self, out_arrs):
