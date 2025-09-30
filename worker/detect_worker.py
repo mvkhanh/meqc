@@ -8,8 +8,7 @@ from utils import submit, poll
 from time import time, sleep
 from threading import Thread, Lock
 from model.face_detector import YuNetFaceDetector
-from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
-from hailo_platform import HEF, InputVStream, OutputVStream, FormatType
+from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType, HEF
 
 # ---------- Helpers ----------
 def list_input_names(im):
@@ -26,44 +25,6 @@ def io_shape(im, is_input, name):
         return (im.input(name).shape if name is not None else im.input().shape)
     else:
         return (im.output(name).shape if name is not None else im.output().shape)
-
-def get_io_fmt(io_obj):
-    # Trả về enum hoặc None
-    if hasattr(io_obj, "get_format_type"):
-        try: 
-            return io_obj.get_format_type()
-        except Exception:
-            pass
-    return getattr(io_obj, "format_type", None)
-
-def fmt_to_dtype(fmt):
-    # Không đụng trực tiếp FormatType.INT8/... vì có bản không có
-    if fmt is None:
-        return np.uint8
-    name = None
-    if hasattr(fmt, "name"):
-        name = fmt.name
-    else:
-        name = str(fmt)  # ví dụ 'FormatType.UINT8' hoặc 'UINT8'
-    name = name.upper()
-    if "UINT8" in name:
-        return np.uint8
-    if "INT8" in name:
-        return np.int8
-    if "FLOAT16" in name or "FP16" in name:
-        return np.float16
-    if "FLOAT32" in name or "FP32" in name:
-        return np.float32
-    # AUTO/UNKNOWN -> mặc định UINT8 (thường đúng với HEF quantized)
-    return np.uint8
-
-def io_set_format(im, is_input, name, fmt):
-    """Set format type cho input/output (từng tên)."""
-    if is_input:
-        (im.input(name) if name is not None else im.input()).set_format_type(fmt)
-    else:
-        (im.output(name) if name is not None else im.output()).set_format_type(fmt)
-
 
 def bindings_set_buffer(bindings, is_input, name, buf):
     """Gán buffer cho bindings theo tên (hoặc None nếu single)."""
@@ -108,6 +69,27 @@ class HailoInferProc(Process):
         e = np.exp(x)
         s = e / (np.sum(e) + 1e-9)
         return s
+    
+    def _load_quant_info(self):
+        """Đọc quant info (scale, zp) cho từng vstream từ HEF."""
+        in_qp, out_qp = {}, {}
+        try:
+            hef = HEF(self.hef_path)
+            for info in hef.get_input_vstream_infos():
+                qi = info.quant_info
+                in_qp[info.name] = (float(qi.qp_scale), float(qi.qp_zp))
+            for info in hef.get_output_vstream_infos():
+                qi = info.quant_info
+                out_qp[info.name] = (float(qi.qp_scale), float(qi.qp_zp))
+        except Exception as e:
+            print(f"[warn] quant_info not available: {e}")
+        return in_qp, out_qp
+
+    def _dequant_output(self, name: str, arr: np.ndarray) -> np.ndarray:
+        """(arr_u8/i8 -> float32) theo (scale, zp) của output name. 
+        Nếu thiếu info: mặc định scale=1, zp=0."""
+        scale, zp = self.out_qp.get(name, (1.0, 0.0))
+        return (arr.astype(np.float32) - zp) * scale
     
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
     def _prep(self, face_rgb: np.ndarray, expected_shape, dtype) -> np.ndarray:
@@ -218,66 +200,53 @@ class HailoInferProc(Process):
         return
 
     def run(self):
-        # VDevice params (giữ chia sẻ multi-process nếu bạn dùng nhiều tiến trình)
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         params.group_id = self.group_id
         params.multi_process_service = True
 
-        # 1) Mở HEF & cấu hình NetGroup
-        hef = HEF(self.hef_path)
+        self.in_qp, self.out_qp = self._load_quant_info()
+        if self.out_qp:
+            print("[quant] outputs:", {k: self.out_qp[k] for k in self.out_qp})
 
-        # Lấy thông tin shape tên các vstream ngay từ HEF (ổn định hơn)
-        in_infos  = {i.name: tuple(i.shape) for i in hef.get_input_vstream_infos()}
-        out_infos = {i.name: tuple(i.shape) for i in hef.get_output_vstream_infos()}
+        with VDevice(params) as vdevice:
+            infer_model = vdevice.create_infer_model(self.hef_path)
+            infer_model.set_batch_size(1)
+            
+            input_names = list_input_names(infer_model)
+            output_names = list_output_names(infer_model)
 
-        with VDevice(params) as vdev:
-            cfg_params = hef.create_configure_params(vdev)
-            net_group  = vdev.configure(hef, cfg_params)
-
-            # 2) Tạo vstream params
-            in_params  = net_group.create_input_vstream_params()
-            out_params = net_group.create_output_vstream_params()
-
-            # 🔑 Ép HailoRT dequantize output về float32
-            for p in out_params.values():
-                p.format.type = FormatType.FLOAT32
-
-            # 3) Mở vstreams
-            with InputVStream(net_group, in_params) as in_vs, \
-                OutputVStream(net_group, out_params) as out_vs:
-
-                in_names  = list(in_vs.keys())            # ví dụ: ['emotion/input_layer1']
-                out_names = sorted(out_vs.keys())         # ví dụ: ['emotion/fc1'] (sort để ổn định thứ tự)
-
-                # Log một lần cho chắc
-                for n in in_names:
-                    print(f"[INPUT VS] {n}: shape={in_infos.get(n)}")
-                for n in out_names:
-                    print(f"[OUTPUT VS] {n}: shape={out_infos.get(n)} (fp32)")
-
+            with infer_model.configure() as cmodel:
                 while True:
                     face = self.in_q.get()
                     if face is None:
                         break
 
-                    # 4) Ghi vào tất cả input vstream (thường chỉ 1)
-                    for n in in_names:
-                        exp_shape = in_infos.get(n)
-                        buf = self._prep(face, exp_shape, np.uint8)  # input VStream thường kỳ vọng UINT8
-                        # _prep đã trả đúng shape (3D HWC hoặc 4D N(H)WC/NCHW) + đúng dtype
-                        in_vs[n].write(buf)
+                    bindings = cmodel.create_bindings()
 
-                    # 5) Đọc toàn bộ outputs (đã là float32 nhờ out_params)
-                    out_list = []
-                    for n in out_names:
-                        arr = out_vs[n].read()  # numpy float32
-                        out_list.append(arr)
+                    # Inputs
+                    for n in input_names:
+                        in_shape = io_shape(infer_model, True, n)
+                        in_buf   = self._prep(face, in_shape, np.uint8)
+                        bindings_set_buffer(bindings, True, n, in_buf)
 
-                    # 6) Hậu xử lý & đẩy ra hàng đợi
-                    result = self._postprocess(out_list)   # hoặc dùng _postprocess_named nếu bạn đã có
+                    # Outputs
+                    for n in output_names:
+                        out_shape = io_shape(infer_model, False, n)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
+                        bindings_set_buffer(bindings, False, n, out_buf)
+
+                    cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
+                    job = cmodel.run_async([bindings], self._cb)
+                    job.wait(self.timeout_ms)
+
+                    out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
+                    out_deq = [self._dequant_output(n, arr) for n, arr in zip(output_names, out_raw)]
+
+                    # Cast sang float32 trong postprocess nếu cần:
+                    result = self._postprocess(out_deq)
                     self.out_q.put(result)
-                    
+
 class DetectWorker(Process):
     """
     Multiprocessing worker:
