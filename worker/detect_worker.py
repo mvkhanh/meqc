@@ -135,9 +135,10 @@ class HailoInferProc(Process):
 
                     # Handle one-output by default; try to support multi-outputs as contiguous buffer if needed
                     out_shape = infer_model.output().shape
-                    print(out_shape)
+   
                     out_buf = np.empty(out_shape, dtype=np.float32)
                     out_buf = np.expand_dims(out_buf, 0)  # (1,H,W,3)
+                    print(out_buf.shape)
 
                     bindings.output().set_buffer(out_buf)
 
