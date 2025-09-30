@@ -73,7 +73,7 @@ class HailoInferProc(Process):
         GAZE_BINWIDTH = 4.0
         GAZE_ANGLE = 180.0
         idx = np.arange(GAZE_BINS, dtype=np.float32)[None, :]
-        print(pitch_logits, yaw_logits)
+        print(pitch_logits.shape, yaw_logits.shape)
         p_pitch = HailoInferProc._softmax(pitch_logits)
         p_yaw = HailoInferProc._softmax(yaw_logits)
         pitch_deg = float(np.sum(p_pitch * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
