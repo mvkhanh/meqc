@@ -140,11 +140,6 @@ class HailoInferProc(Process):
             
             input_names = list_input_names(infer_model)
             output_names = list_output_names(infer_model)
-            
-            for n in input_names:
-                io_set_format(infer_model, True, n, FormatType.FLOAT32)
-            for n in output_names:
-                io_set_format(infer_model, False, n, FormatType.FLOAT32)
 
             with infer_model.configure() as cmodel:
                 while True:
@@ -152,18 +147,19 @@ class HailoInferProc(Process):
                     if face is None:
                         break
 
-                    inp = self._prep(face)
-
                     # Bindings
                     bindings = cmodel.create_bindings()
                     
+                    # --- Inputs: tạo buffer đúng shape cho từng input name
                     for n in input_names:
-                        shape = io_shape(infer_model, True, n)
-                        bindings_set_buffer(bindings, True, n, inp)
-                    
+                        in_shape = io_shape(infer_model, True, n)
+                        in_buf = self._prep(face)
+                        bindings_set_buffer(bindings, True, n, in_buf)
+
+                    # --- Outputs: cấp buffer cho tất cả outputs
                     for n in output_names:
-                        shape = io_shape(infer_model, False, n)
-                        out_buf = np.empty(shape, dtype=np.float32)
+                        out_shape = io_shape(infer_model, False, n)
+                        out_buf = np.empty(out_shape, dtype=np.float32)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
