@@ -9,6 +9,7 @@ from time import time, sleep
 from threading import Thread, Lock
 from model.face_detector import YuNetFaceDetector
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
+from hailo_platform import HEF, InputVStream, OutputVStream, FormatType
 
 # ---------- Helpers ----------
 def list_input_names(im):
@@ -179,51 +180,37 @@ class HailoInferProc(Process):
             raise ValueError(f"Unsupported rank for expected_shape={es}")
 
     def _postprocess(self, out_arrs):
-        # Heuristic dequant (ước lượng từ cặp ONNX vs Hailo bạn đưa)
-        AGE_ZP = 128; AGE_S = 26.037 / (212 - 128)   # ≈ 0.3095
-        G_ZP   = 128; G_S   = 9.04832 / (128 - 88)   # ≈ 0.2262  (từ logit -9.04832 ↔ q=88)
-        EMO_ZP = 128; EMO_S = 1.0                    # scale không ảnh hưởng argmax
-        # out_arrs là list các ndarray uint8 từ Hailo
+        """Best-effort postprocess for demo; adjust to your HEF's real outputs.
+        out_arrs: list[np.ndarray] (one or more outputs).
+        Returns a dict depending on model_type.
+        """
+        out_arrs = np.asarray(out_arrs)
+        print(f'{self.model_type} - Shape: {out_arrs.shape} - {out_arrs}')
         if self.model_type == 'emotion':
-            # emotion/fc1: shape [6] (uint8)
-            q = np.asarray(out_arrs[0], dtype=np.uint8).reshape(-1)
-            v = (q.astype(np.float32) - EMO_ZP) * EMO_S
-            e = np.exp(v - v.max()); prob = e / (e.sum() + 1e-9)
-            idx = int(prob.argmax()); conf = float(prob[idx])
-            EMO6 = ['angry','disgust','fear','happy','sad','surprise']
-            label = EMO6[idx] if prob.size == 6 else f"cls_{idx}"
+            # Assume logits vector for 7 emotions
+            EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+            vec = out_arrs[0].reshape(-1)
+            if vec.size == 0:
+                return {"emotion": None, "emotion_conf": None}
+            prob = self._softmax(vec)
+            idx = int(prob.argmax())
+            conf = float(prob[idx])
+            label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
             return {"emotion": label, "emotion_conf": conf}
-
-        else:
-            # agegender: có 2 output scalar uint8 (conv22, conv23)
-            a0 = int(np.asarray(out_arrs[0], dtype=np.uint8).squeeze())
-            a1 = int(np.asarray(out_arrs[1], dtype=np.uint8).squeeze())
-
-            # Ứng viên tuổi từ mỗi đầu ra
-            age0 = (a0 - AGE_ZP) * AGE_S
-            age1 = (a1 - AGE_ZP) * AGE_S
-
-            # Ứng viên gender-logit từ mỗi đầu ra
-            g0 = (a0 - G_ZP) * G_S
-            g1 = (a1 - G_ZP) * G_S
-
-            # Chọn ánh xạ hợp lý: đầu nào cho tuổi nằm [0..100] “đẹp” hơn thì là age
-            def age_score(x):
-                # ưu tiên x trong [1..100], xa 0 càng tốt
-                return -abs(np.clip(x,0,100) - x) + (10 if (1 <= x <= 100) else 0)
-
-            if age_score(age0) >= age_score(age1):
-                age_years = float(np.clip(age0, 0, 100))
-                g_logit   = float(g1)
+        else:  # agegender
+            g = float(np.asarray(out_arrs[1]).squeeze())
+            age_raw = float(np.asarray(out_arrs[0]).squeeze())
+            prob_female = 1.0 / (1.0 + np.exp(-g))
+            if prob_female >= 0.5:
+                gender_label = "Female"
+                gender_conf = prob_female
             else:
-                age_years = float(np.clip(age1, 0, 100))
-                g_logit   = float(g0)
-
-            prob_female = 1.0 / (1.0 + np.exp(-g_logit))
-            gender_label = "Female" if prob_female >= 0.5 else "Male"
-            gender_conf  = prob_female if prob_female >= 0.5 else (1.0 - prob_female)
+                gender_label = "Male"
+                gender_conf = 1.0 - prob_female
+            age_years = float(np.clip(age_raw, 0, 100))
 
             return {"age": age_years, "gender": gender_label, "gender_conf": gender_conf}
+
     # Dummy callback required by run_async
     @staticmethod
     def _cb(completion_info, bindings):
@@ -231,64 +218,66 @@ class HailoInferProc(Process):
         return
 
     def run(self):
+        # VDevice params (giữ chia sẻ multi-process nếu bạn dùng nhiều tiến trình)
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         params.group_id = self.group_id
         params.multi_process_service = True
 
-        with VDevice(params) as vdevice:
-            infer_model = vdevice.create_infer_model(self.hef_path)
-            infer_model.set_batch_size(1)
-            
-            input_names = list_input_names(infer_model)
-            output_names = list_output_names(infer_model)
+        # 1) Mở HEF & cấu hình NetGroup
+        hef = HEF(self.hef_path)
 
-            # KHÔNG ép:
-            # for n in input_names:  io_set_format(infer_model, True, n, FormatType.FLOAT32)
-            # for n in output_names: io_set_format(infer_model, False, n, FormatType.FLOAT32)
-            for n in input_names:
-                shp = io_shape(infer_model, True, n)
-                fmt = get_io_fmt(infer_model.input(n))
-                print(f"[INPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
-            for n in output_names:
-                shp = io_shape(infer_model, False, n)
-                fmt = get_io_fmt(infer_model.output(n))
-                print(f"[OUTPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
-            with infer_model.configure() as cmodel:
+        # Lấy thông tin shape tên các vstream ngay từ HEF (ổn định hơn)
+        in_infos  = {i.name: tuple(i.shape) for i in hef.get_input_vstream_infos()}
+        out_infos = {i.name: tuple(i.shape) for i in hef.get_output_vstream_infos()}
+
+        with VDevice(params) as vdev:
+            cfg_params = hef.create_configure_params(vdev)
+            net_group  = vdev.configure(hef, cfg_params)
+
+            # 2) Tạo vstream params
+            in_params  = net_group.create_input_vstream_params()
+            out_params = net_group.create_output_vstream_params()
+
+            # 🔑 Ép HailoRT dequantize output về float32
+            for p in out_params.values():
+                p.format.type = FormatType.FLOAT32
+
+            # 3) Mở vstreams
+            with InputVStream(net_group, in_params) as in_vs, \
+                OutputVStream(net_group, out_params) as out_vs:
+
+                in_names  = list(in_vs.keys())            # ví dụ: ['emotion/input_layer1']
+                out_names = sorted(out_vs.keys())         # ví dụ: ['emotion/fc1'] (sort để ổn định thứ tự)
+
+                # Log một lần cho chắc
+                for n in in_names:
+                    print(f"[INPUT VS] {n}: shape={in_infos.get(n)}")
+                for n in out_names:
+                    print(f"[OUTPUT VS] {n}: shape={out_infos.get(n)} (fp32)")
+
                 while True:
                     face = self.in_q.get()
                     if face is None:
                         break
 
-                    bindings = cmodel.create_bindings()
+                    # 4) Ghi vào tất cả input vstream (thường chỉ 1)
+                    for n in in_names:
+                        exp_shape = in_infos.get(n)
+                        buf = self._prep(face, exp_shape, np.uint8)  # input VStream thường kỳ vọng UINT8
+                        # _prep đã trả đúng shape (3D HWC hoặc 4D N(H)WC/NCHW) + đúng dtype
+                        in_vs[n].write(buf)
 
-                    # Inputs
-                    for n in input_names:
-                        in_io    = infer_model.input(n)
-                        in_fmt   = get_io_fmt(in_io)
-                        in_dtype = fmt_to_dtype(in_fmt)
-                        in_shape = io_shape(infer_model, True, n)
-                        in_buf   = self._prep(face, in_shape, in_dtype)
-                        bindings_set_buffer(bindings, True, n, in_buf)
+                    # 5) Đọc toàn bộ outputs (đã là float32 nhờ out_params)
+                    out_list = []
+                    for n in out_names:
+                        arr = out_vs[n].read()  # numpy float32
+                        out_list.append(arr)
 
-                    # Outputs
-                    for n in output_names:
-                        out_io    = infer_model.output(n)
-                        out_fmt   = get_io_fmt(out_io)
-                        out_dtype = fmt_to_dtype(out_fmt)
-                        out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
-                        bindings_set_buffer(bindings, False, n, out_buf)
-
-                    cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    job = cmodel.run_async([bindings], partial(HailoInferProc._cb, bindings=bindings))
-                    job.wait(self.timeout_ms)
-
-                    out_arrs = [bindings_get_buffer(bindings, n) for n in output_names]
-                    # Cast sang float32 trong postprocess nếu cần:
-                    result = self._postprocess(out_arrs)
+                    # 6) Hậu xử lý & đẩy ra hàng đợi
+                    result = self._postprocess(out_list)   # hoặc dùng _postprocess_named nếu bạn đã có
                     self.out_q.put(result)
-
+                    
 class DetectWorker(Process):
     """
     Multiprocessing worker:
