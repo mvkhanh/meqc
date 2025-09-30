@@ -45,11 +45,7 @@ class HailoInferProc(Process):
     It receives RGB face crops on in_q and returns parsed results on out_q.
     model_type: 'agegender' | 'emotion'
     """
-    INPUT_SIZE_MAP = {
-        'agegender': (150, 150),
-        'emotion': (224, 224),
-        'gaze': (448, 448)
-    }
+
     def __init__(self, hef_path: str, model_type: str, in_q: Queue, out_q: Queue,
                  group_id: str = "SHARED", timeout_ms: int = 10000):
         super().__init__(daemon=True)
@@ -92,74 +88,16 @@ class HailoInferProc(Process):
         return (arr.astype(np.float32) - zp) * scale
     
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
-    def _prep(self, face_rgb: np.ndarray, expected_shape, dtype) -> np.ndarray:
+    def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
         """
         Trả về buffer đúng y 'expected_shape' của infer_model.input(name).shape
         và đúng dtype (uint8/float32...). Không tự động thêm batch khi không có.
         """
         es = tuple(int(x) for x in expected_shape)
-        if len(es) == 3:
-            # 3D: HWC hoặc CHW
-            if es[2] in (1, 3):  # HWC
-                H, W, C = es
-                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-                if C == 1:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
-                if np.issubdtype(dtype, np.integer):
-                    buf = img.astype(dtype)
-                else:
-                    buf = img.astype(dtype)
-                assert buf.shape == es, f"prep HWC mismatch: got {buf.shape}, expect {es}"
-                return buf.copy(order="C")
 
-            if es[0] in (1, 3):  # CHW
-                C, H, W = es
-                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-                if C == 1:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                    img = img[:, :, None]
-                if np.issubdtype(dtype, np.integer):
-                    buf = np.transpose(img.astype(dtype), (2, 0, 1))
-                else:
-                    buf = np.transpose(img.astype(dtype), (2, 0, 1))
-                assert buf.shape == es, f"prep CHW mismatch: got {buf.shape}, expect {es}"
-                return buf.copy(order="C")
-
-            raise ValueError(f"Unknown 3D layout for expected_shape={es}")
-
-        elif len(es) == 4:
-            # 4D: NHWC (N,H,W,C) hoặc NCHW (N,C,H,W)
-            if es[-1] in (1, 3):  # NHWC
-                N, H, W, C = es
-                assert N == 1, "Stream hiện tại giả định batch=1"
-                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-                if C == 1:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
-                if np.issubdtype(dtype, np.integer):
-                    buf = img.astype(dtype)[None, ...]
-                else:
-                    buf = img.astype(dtype)[None, ...]
-                assert buf.shape == es, f"prep NHWC mismatch: got {buf.shape}, expect {es}"
-                return buf.copy(order="C")
-
-            if es[1] in (1, 3):  # NCHW
-                N, C, H, W = es
-                assert N == 1, "Stream hiện tại giả định batch=1"
-                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-                if C == 1:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-                    img = img[:, :, None]
-                if np.issubdtype(dtype, np.integer):
-                    buf = np.transpose(img.astype(dtype), (2, 0, 1))[None, ...]
-                else:
-                    buf = np.transpose(img.astype(dtype), (2, 0, 1))[None, ...]
-                assert buf.shape == es, f"prep NCHW mismatch: got {buf.shape}, expect {es}"
-                return buf.copy(order="C")
-
-            raise ValueError(f"Unknown 4D layout for expected_shape={es}")
-
-        else:
-            raise ValueError(f"Unsupported rank for expected_shape={es}")
+        H, W, C = es
+        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+        return img.astype(np.uint8)
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -227,7 +165,7 @@ class HailoInferProc(Process):
                     # Inputs
                     for n in input_names:
                         in_shape = io_shape(infer_model, True, n)
-                        in_buf   = self._prep(face, in_shape, np.uint8)
+                        in_buf   = self._prep(face, in_shape)
                         bindings_set_buffer(bindings, True, n, in_buf)
 
                     # Outputs
