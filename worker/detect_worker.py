@@ -241,6 +241,11 @@ class HailoInferProc(Process):
                 fmt = get_io_fmt(infer_model.output(n))
                 print(f"[OUTPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
             with infer_model.configure() as cmodel:
+                for n in output_names:
+                    try:
+                        cmodel.output(n).set_format_type(FormatType.FLOAT32)
+                    except Exception as e:
+                        print(f"[warn] set FLOAT32 on configured output {n} failed: {e}")
                 while True:
                     face = self.in_q.get()
                     if face is None:
@@ -263,7 +268,7 @@ class HailoInferProc(Process):
                         out_fmt   = get_io_fmt(out_io)
                         out_dtype = fmt_to_dtype(out_fmt)
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.float32)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
