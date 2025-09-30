@@ -10,6 +10,7 @@ from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 def list_input_names(im):
     """Trả về list tên input. Có fallback cho API khác nhau."""
     if hasattr(im, "get_input_names"):
+        print('Have get_input_names')
         return list(im.get_input_names())
     if hasattr(im, "inputs"):
         try:
