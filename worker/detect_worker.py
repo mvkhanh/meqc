@@ -180,8 +180,8 @@ class HailoInferProc(Process):
             label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
             return {"emotion": label, "emotion_conf": conf}
         else:  # agegender
-            g = float(np.asarray(out_arrs[1]).squeeze())
-            age_raw = float(np.asarray(out_arrs[0]).squeeze())
+            g = float(np.asarray(out_arrs[0]).squeeze())
+            age_raw = float(np.asarray(out_arrs[1]).squeeze())
             prob_female = 1.0 / (1.0 + np.exp(-g))
             if prob_female >= 0.5:
                 gender_label = "Female"
