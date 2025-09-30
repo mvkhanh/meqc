@@ -22,6 +22,11 @@ class HailoInferProc(Process):
     It receives RGB face crops on in_q and returns parsed results on out_q.
     model_type: 'agegender' | 'emotion'
     """
+    INPUT_SIZE_MAP = {
+        'agegender': (150, 150),
+        'emotion': (224, 224),
+        'gaze': (448, 448)
+    }
     def __init__(self, hef_path: str, model_type: str, in_q: Queue, out_q: Queue,
                  group_id: str = "SHARED", timeout_ms: int = 10000):
         super().__init__(daemon=True)
@@ -41,23 +46,19 @@ class HailoInferProc(Process):
         e = np.exp(x)
         s = e / (np.sum(e) + 1e-9)
         return s
+    
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
-    @staticmethod
-    def _prep(face_rgb: np.ndarray, input_shape: tuple) -> np.ndarray:
+    def _prep(self, face_rgb: np.ndarray) -> np.ndarray:
         """Prepare input tensor based on input_shape: supports NHWC or NCHW.
         Returned dtype float32 in range [0,1]."""
         # Expected shape includes batch dim
-        if len(input_shape) != 4:
-            raise RuntimeError(f"Unsupported input shape: {input_shape}")
-        n, a, b, c = input_shape
-        # NHWC if last dim is 3, else NCHW
-        if c == 3:  # NHWC
-            H, W = a, b
-            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-            img = img.astype(np.float32)
-            img = np.expand_dims(img, 0)  # (1,H,W,3)
-        else:
-            raise RuntimeError(f"Can't infer layout from shape: {input_shape}")
+        print(f'Face rgb shape: {face_rgb.shape}')
+
+        H, W = HailoInferProc.INPUT_SIZE_MAP[self.model_type]
+        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+        img = img.astype(np.float32)
+        img = np.expand_dims(img, 0)  # (1,H,W,3)
+
         return img
 
     def _postprocess(self, out_arrs):
