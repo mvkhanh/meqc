@@ -31,6 +31,7 @@ class AgeGenderRecognizer:
     def detect(self, face_crop: np.ndarray) -> Tuple[float, str, float]:
         tensor = self.transform_ag(Image.fromarray(face_crop)).unsqueeze(0).numpy()
         outs = self.age_gender_sess.run(None, {self.AG_IN_NAME: tensor})
+        print(f'Age gender: {outs}')
         age_raw = float(np.asarray(outs[0]).squeeze())
         gender_logit = float(np.asarray(outs[1]).squeeze())
 

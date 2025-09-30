@@ -46,7 +46,7 @@ class EmotionRecognizer:
         """
         inp = self.preprocess(face_crop_rgb)
         logits = self.emo_sess.run(None, {self.EMO_IN_NAME: inp})[0]  # (1, C)
-
+        print(f'Emotion: {logits}')
         # softmax an toàn số
         x = logits.reshape(-1)
         x = x - np.max(x)
