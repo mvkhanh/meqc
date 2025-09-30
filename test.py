@@ -1,116 +1,105 @@
-#!/usr/bin/env python3
-"""
-Quick test runner for a Hailo HEF.
-- Loads a HEF you provide
-- Allocates a random input tensor matching the model's input shape
-- Binds ALL outputs by name (handles multi-output models)
-- Runs one async inference and prints output names, shapes, and a small value preview
-
-Usage:
-  python test.py --hef ckpt/agegender.hef --timeout 10000
-Optional:
-  --seed 0            # for reproducibility of random input
-  --float32           # try to set input/output FormatType to FLOAT32 (default on)
-  --no-float32        # do not set FLOAT32 (use model defaults)
-"""
+# hailo_quicktest.py
 import argparse
 import numpy as np
+from functools import partial
+from multiprocessing import Process
+from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 
-try:
-    from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
-except Exception as e:
-    raise SystemExit(f"Hailo SDK not available: {e}")
+
+def cb_print_stats(completion_info, bindings):
+    """Callback: in ra thống kê output để xác nhận pipeline chạy OK."""
+    if completion_info.exception:
+        print("[callback] ❌ Exception:", completion_info.exception)
+        return
+    out = bindings.output().get_buffer()
+    # In stats gọn nhẹ
+    try:
+        print(f"[callback] ✓ Output shape={tuple(out.shape)} "
+              f"min={float(out.min()):.5f} max={float(out.max()):.5f} mean={float(out.mean()):.5f}")
+    except Exception as e:
+        print("[callback] (note) Could not compute stats:", e)
+
+
+def infer_worker(args):
+    # 1) Tạo VDevice với chia sẻ giữa nhiều process (nếu bật)
+    params = VDevice.create_params()
+    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
+    params.group_id = args.group_id
+    if args.mps:
+        params.multi_process_service = True
+
+    timeout_ms = args.timeout_ms
+
+    with VDevice(params) as vdev:
+        # 2) Load model từ HEF
+        infer_model = vdev.create_infer_model(args.hef)
+
+        # 3) (Tuỳ chọn) set batch size
+        if args.batch and args.batch > 0:
+            infer_model.set_batch_size(args.batch)
+
+        # 4) Kiểu dữ liệu I/O (giữ theo mẫu hướng dẫn)
+        infer_model.input().set_format_type(FormatType.FLOAT32)
+        infer_model.output().set_format_type(FormatType.FLOAT32)
+
+        # 5) Configure model -> chạy async
+        with infer_model.configure() as cmodel:
+            jobs = []
+            for i in range(args.frames):
+                # a) Bindings + buffer
+                bindings = cmodel.create_bindings()
+
+                in_shape = infer_model.input().shape
+                out_shape = infer_model.output().shape  # chỉ để log
+                # Sinh input ngẫu nhiên theo đúng shape, float32
+                in_buf = np.random.rand(*in_shape).astype(np.float32)
+                out_buf = np.empty(out_shape, dtype=np.float32)
+
+                bindings.input().set_buffer(in_buf)
+                bindings.output().set_buffer(out_buf)
+
+                # b) Đợi pipeline sẵn sàng rồi run async
+                cmodel.wait_for_async_ready(timeout_ms=timeout_ms)
+                job = cmodel.run_async([bindings], partial(cb_print_stats, bindings=bindings))
+                jobs.append(job)
+
+            # 6) Đợi tất cả job hoàn thành (đảm bảo callback đã chạy)
+            for j in jobs:
+                j.wait(timeout_ms)
+
+    print(f"[proc {args.proc_name}] ✓ Done {args.frames} frame(s), batch={args.batch}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hef", required=True, help="Path to .hef file")
-    ap.add_argument("--timeout", type=int, default=10000, help="Timeout ms for async job")
-    ap.add_argument("--seed", type=int, default=0, help="Random seed for input")
-    ap.add_argument("--float32", dest="set_fp32", action="store_true", default=True,
-                    help="Try to set input/output FormatType to FLOAT32 (default)")
-    ap.add_argument("--no-float32", dest="set_fp32", action="store_false",
-                    help="Do not set FLOAT32 on streams")
+    ap = argparse.ArgumentParser(description="Minimal Hailo HEF async inference quick test.")
+    ap.add_argument("--hef", required=True, help="Đường dẫn file .hef")
+    ap.add_argument("--frames", type=int, default=4, help="Số frame giả lập/inference mỗi process")
+    ap.add_argument("--batch", type=int, default=1, help="Batch size đặt cho infer_model")
+    ap.add_argument("--procs", type=int, default=1, help="Số process song song")
+    ap.add_argument("--mps", action="store_true", help="Bật multi_process_service để chia sẻ Hailo giữa nhiều process")
+    ap.add_argument("--group-id", default="SHARED", help="Group ID dùng chung khi bật MPS")
+    ap.add_argument("--timeout-ms", type=int, default=10000, help="Timeout cho wait_for_async_ready & job.wait")
     args = ap.parse_args()
 
-    np.random.seed(args.seed)
+    if args.procs <= 1:
+        args.proc_name = "P0"
+        print("▶️  Start single-process inference test")
+        infer_worker(args)
+    else:
+        print(f"▶️  Start multi-process inference test: procs={args.procs}, MPS={'ON' if args.mps else 'OFF'}")
+        pool = []
+        for i in range(args.procs):
+            a = argparse.Namespace(**vars(args))
+            a.proc_name = f"P{i}"
+            p = Process(target=infer_worker, args=(a,), daemon=False)
+            pool.append(p)
 
-    # Create a VDevice with multi-process sharing allowed (harmless here)
-    params = VDevice.create_params()
-    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
-    params.group_id = "SHARED"
-    params.multi_process_service = True
+        for p in pool:
+            p.start()
+        for p in pool:
+            p.join()
 
-    with VDevice(params) as vdevice:
-        infer_model = vdevice.create_infer_model(args.hef)
-        infer_model.set_batch_size(1)
-
-        if args.set_fp32:
-            try:
-                infer_model.input().set_format_type(FormatType.FLOAT32)
-                infer_model.output().set_format_type(FormatType.FLOAT32)
-            except Exception as e:
-                print(f'Can not set Float32: {e}')
-                pass
-
-        with infer_model.configure() as configured:
-            # ---- Input binding ----
-            try:
-                in_info = infer_model.input()
-                in_shape = tuple(int(d) for d in in_info.shape)
-                in_dtype = np.float32
-            except Exception:
-                # Fallback: ask configured for input vstream infos
-                infos_in = configured.get_input_vstream_infos()
-                if not infos_in:
-                    raise RuntimeError("Cannot query input vstream info")
-                in_shape = tuple(int(d) for d in infos_in[0].shape)
-                in_dtype = np.float32
-
-            # Allocate random input matching the model's expected input shape
-            x = np.random.rand(*in_shape).astype(in_dtype)
-            bindings = configured.create_bindings()
-            bindings.input().set_buffer(x)
-            print(in_info)
-            # ---- Output bindings (multi-output aware) ----
-            out_names = []
-            try:
-                infos = configured.get_output_vstream_infos()
-                out_names = [info.name for info in infos]
-            except Exception:
-                try:
-                    out_names = infer_model.get_sorted_output_names()
-                except Exception:
-                    out_names = []
-            print(f'Outnames: {out_names}')
-            if out_names:
-                for name in out_names:
-                    try:
-                        out_info = infer_model.output(name)
-                        print(out_info)
-                        out_shape = tuple(int(d) for d in out_info.shape)
-                        out_dtype = np.float32
-                    except Exception:
-                        out_shape, out_dtype = tuple(int(d) for d in infer_model.output().shape), np.float32
-                    buf = np.empty(out_shape, dtype=out_dtype)
-                    bindings.output().set_buffer(buf)
-            # else:
-            #     # Single-output fallback
-            #     out_info = infer_model.output()
-            #     out_shape = tuple(int(d) for d in out_info.shape)
-            #     out_dtype = np.float32
-            #     single_buf = np.empty(out_shape, dtype=out_dtype)
-            #     single_out_b = configured.create_output_binding()
-            #     single_out_b.set_buffer(single_buf)
-            #     output_bindings = [single_out_b]
-            #     bindings_list = [in_b, single_out_b]
-
-            # ---- Run once ----
-            configured.wait_for_async_ready(timeout_ms=args.timeout)
-            job = configured.run_async([bindings], lambda *_: None)
-            job.wait(args.timeout)
-
-            
+    print("✅ All done.")
 
 
 if __name__ == "__main__":
