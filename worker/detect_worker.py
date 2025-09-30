@@ -142,6 +142,7 @@ class HailoInferProc(Process):
             return {"emotion": label, "emotion_conf": conf}
         
         elif self.model_type == 'gaze':
+            print(out_arrs.shape)
             EYE_CONTACT_THRESH_DEG = 12.0
             pitch_logits = out_arrs[0]
             yaw_logits = out_arrs[1]
