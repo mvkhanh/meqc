@@ -38,7 +38,7 @@ def get_io_fmt(io_obj):
 def fmt_to_dtype(fmt):
     # Không đụng trực tiếp FormatType.INT8/... vì có bản không có
     if fmt is None:
-        return np.uint8
+        return np.int8
     name = None
     if hasattr(fmt, "name"):
         name = fmt.name
