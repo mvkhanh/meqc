@@ -82,26 +82,10 @@ class HailoInferProc(Process):
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
     def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
         """Chuẩn hoá input theo expected_shape (NCHW hoặc NHWC). Trả float32."""
-        if len(expected_shape) != 4:
-            raise ValueError(f"Only 4D input supported, got {expected_shape}")
 
-        if expected_shape[-1] == 3:  # NHWC: (N,H,W,3)
-            H, W = expected_shape[1], expected_shape[2]
-            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-            img = np.expand_dims(img, 0)  # (1,H,W,3)
-            return img
-
-        if expected_shape[1] == 3:    # NCHW: (N,3,H,W)
-            H, W = expected_shape[2], expected_shape[3]
-            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-            img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
-            img = np.expand_dims(img, 0)        # (1,3,H,W)
-            return img
-
-        # Fallback: coi như NHWC
-        H, W = expected_shape[1], expected_shape[2]
+        H, W = expected_shape[0], expected_shape[1]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        img = np.expand_dims(img, 0)
+        img = np.expand_dims(img, 0)  # (1,H,W,3)
         return img.astype(np.float32)
 
     def _postprocess(self, out_arrs):
