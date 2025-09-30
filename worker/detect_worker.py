@@ -73,8 +73,9 @@ class HailoInferProc(Process):
         GAZE_BINWIDTH = 4.0
         GAZE_ANGLE = 180.0
         idx = np.arange(GAZE_BINS, dtype=np.float32)[None, :]
-        p_pitch = HailoInferProc._softmax(pitch_logits, axis=1)
-        p_yaw = HailoInferProc._softmax(yaw_logits, axis=1)
+        print(pitch_logits, yaw_logits)
+        p_pitch = HailoInferProc._softmax(pitch_logits)
+        p_yaw = HailoInferProc._softmax(yaw_logits)
         pitch_deg = float(np.sum(p_pitch * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         yaw_deg = float(np.sum(p_yaw * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         return yaw_deg, pitch_deg
@@ -137,7 +138,6 @@ class HailoInferProc(Process):
             return {"emotion": label, "emotion_conf": conf}
         
         elif self.model_type == 'gaze':
-            print(out_arrs.shape)
             EYE_CONTACT_THRESH_DEG = 12.0
             pitch_logits = out_arrs[0]
             yaw_logits = out_arrs[1]
