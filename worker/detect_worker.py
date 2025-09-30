@@ -125,7 +125,7 @@ class HailoInferProc(Process):
                 if np.issubdtype(dtype, np.integer):
                     buf = img.astype(dtype)
                 else:
-                    buf = (img.astype(np.float32) / 255.0).astype(dtype)
+                    buf = img.astype(dtype)
                 assert buf.shape == es, f"prep HWC mismatch: got {buf.shape}, expect {es}"
                 return buf.copy(order="C")
 
@@ -138,7 +138,7 @@ class HailoInferProc(Process):
                 if np.issubdtype(dtype, np.integer):
                     buf = np.transpose(img.astype(dtype), (2, 0, 1))
                 else:
-                    buf = np.transpose((img.astype(np.float32)/255.0).astype(dtype), (2, 0, 1))
+                    buf = np.transpose(img.astype(dtype), (2, 0, 1))
                 assert buf.shape == es, f"prep CHW mismatch: got {buf.shape}, expect {es}"
                 return buf.copy(order="C")
 
@@ -155,7 +155,7 @@ class HailoInferProc(Process):
                 if np.issubdtype(dtype, np.integer):
                     buf = img.astype(dtype)[None, ...]
                 else:
-                    buf = (img.astype(np.float32)/255.0).astype(dtype)[None, ...]
+                    buf = img.astype(dtype)[None, ...]
                 assert buf.shape == es, f"prep NHWC mismatch: got {buf.shape}, expect {es}"
                 return buf.copy(order="C")
 
@@ -169,7 +169,7 @@ class HailoInferProc(Process):
                 if np.issubdtype(dtype, np.integer):
                     buf = np.transpose(img.astype(dtype), (2, 0, 1))[None, ...]
                 else:
-                    buf = np.transpose((img.astype(np.float32)/255.0).astype(dtype), (2, 0, 1))[None, ...]
+                    buf = np.transpose(img.astype(dtype), (2, 0, 1))[None, ...]
                 assert buf.shape == es, f"prep NCHW mismatch: got {buf.shape}, expect {es}"
                 return buf.copy(order="C")
 
