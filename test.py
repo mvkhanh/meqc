@@ -9,32 +9,12 @@ from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 # ---------- Helpers ----------
 def list_input_names(im):
     """Trả về list tên input. Có fallback cho API khác nhau."""
-    if hasattr(im, "inputs"):
-        try:
-            return list(im.inputs.keys())            # dict-like
-        except Exception:
-            try:
-                print("Here")
-                return [x.name for x in im.inputs]   # list of objects
-            except Exception:
-                pass
-    # Fallback: single input (không tên)
-    return [None]
+    return [x.name for x in im.inputs]   # list of objects
 
 
 def list_output_names(im):
     """Trả về list tên output. Có fallback cho API khác nhau."""
-    if hasattr(im, "outputs"):
-        try:
-            return list(im.outputs.keys())
-        except Exception:
-            try:
-                return [x.name for x in im.outputs]
-            except Exception:
-                pass
-    # Fallback: single output (không tên)
-    return [None]
-
+    return [x.name for x in im.outputs]
 
 def io_shape(im, is_input, name):
     """Lấy shape cho input/output theo name (hoặc None nếu single)."""
