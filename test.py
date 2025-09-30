@@ -51,6 +51,7 @@ def infer_worker(args):
 
                 in_shape = infer_model.input().shape
                 out_shape = infer_model.output().shape  # chỉ để log
+                print(out_shape)
                 # Sinh input ngẫu nhiên theo đúng shape, float32
                 in_buf = np.random.rand(*in_shape).astype(np.float32)
                 out_buf = np.empty(out_shape, dtype=np.float32)

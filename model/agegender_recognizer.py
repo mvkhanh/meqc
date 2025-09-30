@@ -33,7 +33,7 @@ class AgeGenderRecognizer:
         outs = self.age_gender_sess.run(None, {self.AG_IN_NAME: tensor})
         age_raw = float(np.asarray(outs[0]).squeeze())
         gender_logit = float(np.asarray(outs[1]).squeeze())
-
+        print(f'Agegender: {np.asarray(outs).shape}')
         age_years = float(np.clip(age_raw, 0, 100))
 
         prob_female = 1.0 / (1.0 + np.exp(-gender_logit))

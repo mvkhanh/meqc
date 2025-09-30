@@ -45,10 +45,10 @@ class EmotionRecognizer:
         Trả về (emotion_label, confidence)
         """
         inp = self.preprocess(face_crop_rgb)
-        logits = self.emo_sess.run(None, {self.EMO_IN_NAME: inp})[0]  # (1, C)
-
+        logits = self.emo_sess.run(None, {self.EMO_IN_NAME: inp})  # (1, C)
+        print(f'Emotion output shape: {np.asarray(logits).shape}')
         # softmax an toàn số
-        x = logits.reshape(-1)
+        x = np.asarray(logits).reshape(-1)
         x = x - np.max(x)
         e = np.exp(x, dtype=np.float64)
         probs = (e / e.sum()).astype(np.float32)
