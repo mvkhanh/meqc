@@ -80,17 +80,29 @@ class HailoInferProc(Process):
         return s
     
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
-    def _prep(self, face_rgb: np.ndarray) -> np.ndarray:
-        """Prepare input tensor based on input_shape: supports NHWC or NCHW.
-        Returned dtype float32 in range [0,1]."""
-        # Expected shape includes batch dim
+    def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
+        """Chuẩn hoá input theo expected_shape (NCHW hoặc NHWC). Trả float32."""
+        if len(expected_shape) != 4:
+            raise ValueError(f"Only 4D input supported, got {expected_shape}")
 
-        H, W = HailoInferProc.INPUT_SIZE_MAP[self.model_type]
+        if expected_shape[-1] == 3:  # NHWC: (N,H,W,3)
+            H, W = expected_shape[1], expected_shape[2]
+            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+            img = np.expand_dims(img, 0)  # (1,H,W,3)
+            return img
+
+        if expected_shape[1] == 3:    # NCHW: (N,3,H,W)
+            H, W = expected_shape[2], expected_shape[3]
+            img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+            img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+            img = np.expand_dims(img, 0)        # (1,3,H,W)
+            return img
+
+        # Fallback: coi như NHWC
+        H, W = expected_shape[1], expected_shape[2]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        img = img.astype(np.float32)
-        img = np.expand_dims(img, 0)  # (1,H,W,3)
-
-        return img
+        img = np.expand_dims(img, 0)
+        return img.astype(np.float32)
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -153,7 +165,7 @@ class HailoInferProc(Process):
                     # --- Inputs: tạo buffer đúng shape cho từng input name
                     for n in input_names:
                         in_shape = io_shape(infer_model, True, n)
-                        in_buf = self._prep(face)
+                        in_buf = self._prep(face, in_shape)
                         bindings_set_buffer(bindings, True, n, in_buf)
 
                     # --- Outputs: cấp buffer cho tất cả outputs
