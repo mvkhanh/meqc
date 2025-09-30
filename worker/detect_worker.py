@@ -3,6 +3,7 @@ from multiprocessing import Process, Queue, Event
 from typing import Optional
 import numpy as np
 import cv2
+import math
 from functools import partial
 from utils import submit, poll
 from time import time, sleep
@@ -66,6 +67,29 @@ class HailoInferProc(Process):
         s = e / (np.sum(e) + 1e-9)
         return s
     
+    @staticmethod
+    def softmax_np(x, axis=1):
+        x = x - np.max(x, axis=axis, keepdims=True); e = np.exp(x)
+        return e / (np.sum(e, axis=axis, keepdims=True) + 1e-9)
+    
+    @staticmethod
+    def decode_gaze3Gaze_bins(pitch_logits, yaw_logits):
+        GAZE_BINS = 90
+        GAZE_BINWIDTH = 4.0
+        GAZE_ANGLE = 180.0
+        idx = np.arange(GAZE_BINS, dtype=np.float32)[None, :]
+        p_pitch = HailoInferProc.softmax_np(pitch_logits, axis=1)
+        p_yaw = HailoInferProc.softmax_np(yaw_logits, axis=1)
+        pitch_deg = float(np.sum(p_pitch * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
+        yaw_deg = float(np.sum(p_yaw * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
+        return yaw_deg, pitch_deg
+    
+    @staticmethod
+    def eye_contact_angle(gaze_vec):
+        f = np.array([0, 0, -1], dtype=np.float32); v = gaze_vec / (np.linalg.norm(gaze_vec) + 1e-6)
+        cos_ = float(np.clip(np.dot(v, f), -1.0, 1.0))
+        return float(np.degrees(np.arccos(cos_)))
+    
     def _load_quant_info(self):
         """Đọc quant info (scale, zp) cho từng vstream từ HEF."""
         in_qp, out_qp = {}, {}
@@ -116,6 +140,21 @@ class HailoInferProc(Process):
             conf = float(prob[idx])
             label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
             return {"emotion": label, "emotion_conf": conf}
+        
+        elif self.model_type == 'gaze':
+            EYE_CONTACT_THRESH_DEG = 12.0
+            pitch_logits = out_arrs[0]
+            yaw_logits = out_arrs[1]
+            yaw_deg, pitch_deg = HailoInferProc.decode_gaze3Gaze_bins(pitch_logits, yaw_logits)
+            yaw_rad, pitch_rad = math.radians(yaw_deg), math.radians(pitch_deg)
+            gx = math.sin(yaw_rad) * math.cos(pitch_rad); gy = math.sin(pitch_rad); gz = -math.cos(yaw_rad) * math.cos(pitch_rad)
+            gaze_vec = np.array([gx, gy, gz], dtype=np.float32); gaze_vec /= (np.linalg.norm(gaze_vec) + 1e-6)
+            theta = HailoInferProc.eye_contact_angle(gaze_vec)
+            eye_contact = theta <= EYE_CONTACT_THRESH_DEG
+            return {
+                "eye_contact": eye_contact
+            }
+        
         else:  # agegender
             g = float(np.asarray(out_arrs[0]).squeeze())
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
@@ -195,14 +234,15 @@ class DetectWorker(Process):
     """
 
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
-                 in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None):
+                 in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
         self.detector = None
         self.detector_path = detector_path
-        # self.agegender / self.emotion (ONNX) are removed; replaced by Hailo processes
-        self.agegender_path = agegender_path  # expecting .hef
-        self.emotion_path = emotion_path      # expecting .hef
+
+        self.agegender_path = agegender_path 
+        self.emotion_path = emotion_path     
+        self.gaze_path = gaze_path
 
         self.face_score_thres = face_score_thres
         self.width = width
@@ -220,10 +260,13 @@ class DetectWorker(Process):
         self._ag_out = None
         self._emo_in = None
         self._emo_out = None
-
+        self._gaze_in = None
+        self._gaze_out = None
+        
         # Hailo subprocess handles
         self._ag_proc = None
         self._emo_proc = None
+        self._gaze_proc = None
 
     # -------------------- Helper --------------------
     @staticmethod
@@ -266,6 +309,12 @@ class DetectWorker(Process):
                 parts.append(f"{res['emotion']} {int(round(res['emotion_conf']*100))}%")
             else:
                 parts.append(f"{res['emotion']}")
+                # Eye contact info
+        dwell = res.get("eye_contact_dwell")
+        ec = res.get("eye_contact")
+        if dwell is not None and dwell > 0:
+            tag = "Eye✓" if (ec and dwell >= 3.0) else "Eye"
+            parts.append(f"{tag} {dwell:.1f}s")
         text = " | ".join(parts)
 
         if text and box is not None:
@@ -329,6 +378,43 @@ class DetectWorker(Process):
             except Empty:
                 pass
             sleep(0.003)
+            
+    def _gaze_loop(self):
+        if self._gaze_in is None or self._gaze_out is None:
+            return
+        last_ver = -1
+        from queue import Empty
+        while not self._stop.is_set():
+            # Grab latest face when it changes
+            with self.shared["lock"]:
+                ver = self.shared["face_ver"]
+                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
+            if face is not None:
+                submit(self._gaze_in, face)
+                last_ver = ver
+            # Non-blocking result read
+            try:
+                res = self._gaze_out.get_nowait()  # expected dict from HailoInferProc (gaze)
+                now = time()
+                with self.shared["lock"]:
+                    # Update dwell timer
+                    if isinstance(res, dict):
+                        ec = bool(res.get("eye_contact", False))
+                        if ec:
+                            if not self.shared.get("eye_on_since"):
+                                self.shared["eye_on_since"] = now
+                            dwell = now - (self.shared["eye_on_since"] or now)
+                        else:
+                            self.shared["eye_on_since"] = 0.0
+                            dwell = 0.0
+                        self.shared["result"]["eye_contact"] = ec
+                        self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
+                        self.shared["result"]["ts"] = now
+            except Empty:
+                pass
+
+            sleep(0.003)
+
 
     # -------------------- Main process loop --------------------
     def run(self):
@@ -344,8 +430,11 @@ class DetectWorker(Process):
                 "gender_conf": None,
                 "emotion": None,
                 "emotion_conf": None,
-                "ts": 0.0
-            }
+                "ts": 0.0,
+                "eye_contact": None,
+                "eye_contact_dwell": 0.0,
+            },
+            "eye_on_since": 0.0,
         }
 
         self.detector = YuNetFaceDetector(model_path=self.detector_path, face_score_thres=self.face_score_thres,
@@ -366,6 +455,13 @@ class DetectWorker(Process):
             self._emo_proc.start()
         else:
             raise FileNotFoundError(f'Not found {self.emotion_path}')
+        
+        if os.path.exists(self.gaze_path):
+            self._gaze_in, self._gaze_out = Queue(maxsize=1), Queue(maxsize=1)
+            self._gaze_proc = HailoInferProc(self.gaze_path, 'gaze', self._gaze_in, self._gaze_out, GROUP_ID)
+            self._gaze_proc.start()
+        else:
+            raise FileNotFoundError(f'Not found {self.gaze_path}')
 
         # Background threads that feed face crops to the subprocesses and pull results back
         ag_thread = Thread(target=self._agegender_loop, daemon=True)
@@ -374,6 +470,9 @@ class DetectWorker(Process):
         em_thread = Thread(target=self._emotion_loop, daemon=True)
         if self._emo_proc is not None:
             em_thread.start()
+        gaze_thread = Thread(target=self._gaze_loop, daemon=True)
+        if self._gaze_proc is not None:
+            gaze_thread.start()
 
         # Main loop: receive frame, (periodically) detect -> update crop + draw overlay
         while not self._stop.is_set():
@@ -419,6 +518,12 @@ class DetectWorker(Process):
                 em_thread.join(timeout=0.1)
         except Exception:
             pass
+        try:
+            if gaze_thread.is_alive():
+                gaze_thread.join(timeout=0.1)
+        except Exception:
+            pass
+        
 
         # Tell subprocesses to stop
         try:
@@ -432,6 +537,11 @@ class DetectWorker(Process):
         except Exception:
             pass
         try:
+            if self._gaze_in is not None:
+                self._gaze_in.put_nowait(None)
+        except Exception:
+            pass
+        try:
             if self._ag_proc is not None:
                 self._ag_proc.join(timeout=0.5)
         except Exception:
@@ -439,6 +549,11 @@ class DetectWorker(Process):
         try:
             if self._emo_proc is not None:
                 self._emo_proc.join(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if self._gaze_proc is not None:
+                self._gaze_proc.join(timeout=0.5)
         except Exception:
             pass
 
