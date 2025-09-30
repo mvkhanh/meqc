@@ -135,59 +135,21 @@ class HailoInferProc(Process):
                         img = cv2.resize(face, (224, 224)).astype(np.float32) / 255.0
                         inp = np.expand_dims(img, 0)
 
-                    # Create input binding
-                    in_b = configured.create_input_binding()
-                    in_b.set_buffer(inp)
+                    # Bindings
+                    bindings = configured.create_bindings()
+                    bindings.input().set_buffer(inp)
 
-                    # Discover output names and create per-output bindings
-                    out_names = []
-                    try:
-                        # Preferred: ask the configured model for output vstream infos
-                        infos = configured.get_output_vstream_infos()
-                        out_names = [info.name for info in infos]
-                    except Exception:
-                        try:
-                            # Fallback: ask the model for sorted output names
-                            out_names = infer_model.get_sorted_output_names()
-                        except Exception:
-                            out_names = []
-
-                    output_bindings = []
-                    if out_names:
-                        # Multiple (or known) outputs – bind each one explicitly by name
-                        for name in out_names:
-                            try:
-                                out_info = infer_model.output(name)
-                                out_shape = out_info.shape
-                                out_dtype = getattr(out_info, 'dtype', np.float32)
-                            except Exception:
-                                # Best-effort fallback
-                                out_shape, out_dtype = (infer_model.output().shape, np.float32)
-                            buf = np.empty(out_shape, dtype=out_dtype)
-                            out_b = configured.create_output_binding(name)
-                            out_b.set_buffer(buf)
-                            output_bindings.append(out_b)
-
-                        bindings_list = [in_b] + output_bindings
-                    else:
-                        # Single output path – keep backward compatibility
-                        out_info = infer_model.output()
-                        out_shape = out_info.shape
-                        out_dtype = getattr(out_info, 'dtype', np.float32)
-                        single_out_b = configured.create_output_binding()
-                        single_buf = np.empty(out_shape, dtype=out_dtype)
-                        single_out_b.set_buffer(single_buf)
-                        bindings_list = [in_b, single_out_b]
+                    # Handle one-output by default; try to support multi-outputs as contiguous buffer if needed
+                    out_shape = infer_model.output().shape
+                    out_buf = np.empty(out_shape, dtype=np.float32)
+                    bindings.output().set_buffer(out_buf)
 
                     configured.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    job = configured.run_async(bindings_list, lambda completion_info, b=None: self._cb(completion_info, b))
+                    job = configured.run_async([bindings], lambda completion_info, b=bindings: self._cb(completion_info, b))
                     job.wait(self.timeout_ms)
 
-                    # Collect outputs in a list (order follows out_names if available)
-                    if out_names:
-                        out_arrs = [b.get_buffer() for b in output_bindings]
-                    else:
-                        out_arrs = [single_out_b.get_buffer()]
+                    # Read outputs (single output path)
+                    out_arrs = [bindings.output().get_buffer()]
 
                     # Parse & push
                     result = self._postprocess(out_arrs)
