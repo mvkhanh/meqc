@@ -179,37 +179,51 @@ class HailoInferProc(Process):
             raise ValueError(f"Unsupported rank for expected_shape={es}")
 
     def _postprocess(self, out_arrs):
-        """Best-effort postprocess for demo; adjust to your HEF's real outputs.
-        out_arrs: list[np.ndarray] (one or more outputs).
-        Returns a dict depending on model_type.
-        """
-        out_arrs = np.asarray(out_arrs)
-        print(f'{self.model_type} - Shape: {out_arrs.shape} - {out_arrs}')
+        # Heuristic dequant (ước lượng từ cặp ONNX vs Hailo bạn đưa)
+        AGE_ZP = 128; AGE_S = 26.037 / (212 - 128)   # ≈ 0.3095
+        G_ZP   = 128; G_S   = 9.04832 / (128 - 88)   # ≈ 0.2262  (từ logit -9.04832 ↔ q=88)
+        EMO_ZP = 128; EMO_S = 1.0                    # scale không ảnh hưởng argmax
+        # out_arrs là list các ndarray uint8 từ Hailo
         if self.model_type == 'emotion':
-            # Assume logits vector for 7 emotions
-            EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
-            vec = out_arrs[0].reshape(-1)
-            if vec.size == 0:
-                return {"emotion": None, "emotion_conf": None}
-            prob = self._softmax(vec)
-            idx = int(prob.argmax())
-            conf = float(prob[idx])
-            label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
+            # emotion/fc1: shape [6] (uint8)
+            q = np.asarray(out_arrs[0], dtype=np.uint8).reshape(-1)
+            v = (q.astype(np.float32) - EMO_ZP) * EMO_S
+            e = np.exp(v - v.max()); prob = e / (e.sum() + 1e-9)
+            idx = int(prob.argmax()); conf = float(prob[idx])
+            EMO6 = ['angry','disgust','fear','happy','sad','surprise']
+            label = EMO6[idx] if prob.size == 6 else f"cls_{idx}"
             return {"emotion": label, "emotion_conf": conf}
-        else:  # agegender
-            g = float(np.asarray(out_arrs[1]).squeeze())
-            age_raw = float(np.asarray(out_arrs[0]).squeeze())
-            prob_female = 1.0 / (1.0 + np.exp(-g))
-            if prob_female >= 0.5:
-                gender_label = "Female"
-                gender_conf = prob_female
+
+        else:
+            # agegender: có 2 output scalar uint8 (conv22, conv23)
+            a0 = int(np.asarray(out_arrs[0], dtype=np.uint8).squeeze())
+            a1 = int(np.asarray(out_arrs[1], dtype=np.uint8).squeeze())
+
+            # Ứng viên tuổi từ mỗi đầu ra
+            age0 = (a0 - AGE_ZP) * AGE_S
+            age1 = (a1 - AGE_ZP) * AGE_S
+
+            # Ứng viên gender-logit từ mỗi đầu ra
+            g0 = (a0 - G_ZP) * G_S
+            g1 = (a1 - G_ZP) * G_S
+
+            # Chọn ánh xạ hợp lý: đầu nào cho tuổi nằm [0..100] “đẹp” hơn thì là age
+            def age_score(x):
+                # ưu tiên x trong [1..100], xa 0 càng tốt
+                return -abs(np.clip(x,0,100) - x) + (10 if (1 <= x <= 100) else 0)
+
+            if age_score(age0) >= age_score(age1):
+                age_years = float(np.clip(age0, 0, 100))
+                g_logit   = float(g1)
             else:
-                gender_label = "Male"
-                gender_conf = 1.0 - prob_female
-            age_years = float(np.clip(age_raw, 0, 100))
+                age_years = float(np.clip(age1, 0, 100))
+                g_logit   = float(g0)
+
+            prob_female = 1.0 / (1.0 + np.exp(-g_logit))
+            gender_label = "Female" if prob_female >= 0.5 else "Male"
+            gender_conf  = prob_female if prob_female >= 0.5 else (1.0 - prob_female)
 
             return {"age": age_years, "gender": gender_label, "gender_conf": gender_conf}
-
     # Dummy callback required by run_async
     @staticmethod
     def _cb(completion_info, bindings):
@@ -241,11 +255,6 @@ class HailoInferProc(Process):
                 fmt = get_io_fmt(infer_model.output(n))
                 print(f"[OUTPUT] {n}: shape={shp}, fmt={getattr(fmt,'name',fmt)}")
             with infer_model.configure() as cmodel:
-                for n in output_names:
-                    try:
-                        cmodel.output(n).set_format_type(FormatType.FLOAT32)
-                    except Exception as e:
-                        print(f"[warn] set FLOAT32 on configured output {n} failed: {e}")
                 while True:
                     face = self.in_q.get()
                     if face is None:
@@ -268,7 +277,7 @@ class HailoInferProc(Process):
                         out_fmt   = get_io_fmt(out_io)
                         out_dtype = fmt_to_dtype(out_fmt)
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.float32)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
