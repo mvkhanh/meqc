@@ -26,6 +26,16 @@ def io_shape(im, is_input, name):
     else:
         return (im.output(name).shape if name is not None else im.output().shape)
 
+def get_io_fmt(io_obj):
+    return io_obj.get_format_type() if hasattr(io_obj, "get_format_type") else None
+
+def fmt_to_dtype(fmt):
+    return {
+        FormatType.UINT8:   np.uint8,
+        FormatType.INT8:    np.int8,
+        FormatType.FLOAT16: np.float16,
+        FormatType.FLOAT32: np.float32,
+    }.get(fmt, np.uint8)  # fallback an toàn
 
 def io_set_format(im, is_input, name, fmt):
     """Set format type cho input/output (từng tên)."""
@@ -154,8 +164,12 @@ class HailoInferProc(Process):
 
                     # --- Outputs: cấp buffer cho tất cả outputs
                     for n in output_names:
+                        out_io    = infer_model.output(n)
+                        out_fmt   = get_io_fmt(out_io)
+                        out_dtype = fmt_to_dtype(out_fmt)   # <- dùng dtype đúng
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf = np.empty(out_shape, dtype=np.float32)
+
+                        out_buf = np.empty(out_shape, dtype=out_dtype)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
@@ -167,7 +181,7 @@ class HailoInferProc(Process):
 
                     # Read outputs (single output path)
                     out_arrs = [bindings.output().get_buffer()]
-
+                    
                     # Parse & push
                     result = self._postprocess(out_arrs)
                     self.out_q.put(result)
