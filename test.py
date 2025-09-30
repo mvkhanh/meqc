@@ -49,7 +49,8 @@ def main():
             try:
                 infer_model.input().set_format_type(FormatType.FLOAT32)
                 infer_model.output().set_format_type(FormatType.FLOAT32)
-            except Exception:
+            except Exception as e:
+                print(f'Can not set Float32: {e}')
                 pass
 
         with infer_model.configure() as configured:
@@ -68,12 +69,11 @@ def main():
 
             # Allocate random input matching the model's expected input shape
             x = np.random.rand(*in_shape).astype(in_dtype)
-            in_b = configured.create_input_binding()
-            in_b.set_buffer(x)
-
+            bindings = configured.create_bindings()
+            bindings.input().set_buffer(x)
+            print(in_info)
             # ---- Output bindings (multi-output aware) ----
             out_names = []
-            output_bindings = []
             try:
                 infos = configured.get_output_vstream_infos()
                 out_names = [info.name for info in infos]
@@ -82,52 +82,35 @@ def main():
                     out_names = infer_model.get_sorted_output_names()
                 except Exception:
                     out_names = []
-
+            print(f'Outnames: {out_names}')
             if out_names:
                 for name in out_names:
                     try:
                         out_info = infer_model.output(name)
+                        print(out_info)
                         out_shape = tuple(int(d) for d in out_info.shape)
                         out_dtype = np.float32
                     except Exception:
                         out_shape, out_dtype = tuple(int(d) for d in infer_model.output().shape), np.float32
                     buf = np.empty(out_shape, dtype=out_dtype)
-                    out_b = configured.create_output_binding(name)
-                    out_b.set_buffer(buf)
-                    output_bindings.append(out_b)
-                bindings_list = [in_b] + output_bindings
-            else:
-                # Single-output fallback
-                out_info = infer_model.output()
-                out_shape = tuple(int(d) for d in out_info.shape)
-                out_dtype = np.float32
-                single_buf = np.empty(out_shape, dtype=out_dtype)
-                single_out_b = configured.create_output_binding()
-                single_out_b.set_buffer(single_buf)
-                output_bindings = [single_out_b]
-                bindings_list = [in_b, single_out_b]
+                    bindings.output().set_buffer(buf)
+            # else:
+            #     # Single-output fallback
+            #     out_info = infer_model.output()
+            #     out_shape = tuple(int(d) for d in out_info.shape)
+            #     out_dtype = np.float32
+            #     single_buf = np.empty(out_shape, dtype=out_dtype)
+            #     single_out_b = configured.create_output_binding()
+            #     single_out_b.set_buffer(single_buf)
+            #     output_bindings = [single_out_b]
+            #     bindings_list = [in_b, single_out_b]
 
             # ---- Run once ----
             configured.wait_for_async_ready(timeout_ms=args.timeout)
-            job = configured.run_async(bindings_list, lambda *_: None)
+            job = configured.run_async([bindings], lambda *_: None)
             job.wait(args.timeout)
 
-            # ---- Collect & print ----
-            print("\n=== Inference Results ===")
-            if out_names:
-                for name, b in zip(out_names, output_bindings):
-                    arr = b.get_buffer()
-                    print(f"- {name}: shape={arr.shape}, dtype={arr.dtype}")
-                    # Print a tiny preview (first up to 6 values)
-                    flat = arr.reshape(-1)
-                    preview = ", ".join(f"{v:.4f}" for v in flat[:6])
-                    print(f"  preview: [{preview}]\n")
-            else:
-                arr = output_bindings[0].get_buffer()
-                print(f"- output: shape={arr.shape}, dtype={arr.dtype}")
-                flat = arr.reshape(-1)
-                preview = ", ".join(f"{v:.4f}" for v in flat[:6])
-                print(f"  preview: [{preview}]\n")
+            
 
 
 if __name__ == "__main__":
