@@ -3,17 +3,49 @@ from multiprocessing import Process, Queue, Event
 from typing import Optional
 import numpy as np
 import cv2
+from functools import partial
 from utils import submit, poll
 from time import time, sleep
 from threading import Thread, Lock
 from model.face_detector import YuNetFaceDetector
+from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 
-# ---- NEW: Hailo imports ----
-try:
-    from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
-except Exception:
-    VDevice = None  # allow file to import on machines without Hailo
+# ---------- Helpers ----------
+def list_input_names(im):
+    """Trả về list tên input. Có fallback cho API khác nhau."""
+    return [x.name for x in im.inputs]   # list of objects
 
+def list_output_names(im):
+    """Trả về list tên output. Có fallback cho API khác nhau."""
+    return [x.name for x in im.outputs]
+
+def io_shape(im, is_input, name):
+    """Lấy shape cho input/output theo name (hoặc None nếu single)."""
+    if is_input:
+        return (im.input(name).shape if name is not None else im.input().shape)
+    else:
+        return (im.output(name).shape if name is not None else im.output().shape)
+
+
+def io_set_format(im, is_input, name, fmt):
+    """Set format type cho input/output (từng tên)."""
+    if is_input:
+        (im.input(name) if name is not None else im.input()).set_format_type(fmt)
+    else:
+        (im.output(name) if name is not None else im.output()).set_format_type(fmt)
+
+
+def bindings_set_buffer(bindings, is_input, name, buf):
+    """Gán buffer cho bindings theo tên (hoặc None nếu single)."""
+    if is_input:
+        (bindings.input(name) if name is not None else bindings.input()).set_buffer(buf)
+    else:
+        (bindings.output(name) if name is not None else bindings.output()).set_buffer(buf)
+
+
+def bindings_get_buffer(bindings, name):
+    """Lấy buffer output theo tên (hoặc None nếu single)."""
+    return (bindings.output(name) if name is not None else bindings.output()).get_buffer()
 
 class HailoInferProc(Process):
     """
@@ -97,15 +129,6 @@ class HailoInferProc(Process):
         return
 
     def run(self):
-        if VDevice is None:
-            # Hailo SDK not available; drain queue and return None results
-            while True:
-                item = self.in_q.get()
-                if item is None:
-                    break
-                self.out_q.put({})
-            return
-
         params = VDevice.create_params()
         params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
         params.group_id = self.group_id
@@ -114,14 +137,16 @@ class HailoInferProc(Process):
         with VDevice(params) as vdevice:
             infer_model = vdevice.create_infer_model(self.hef_path)
             infer_model.set_batch_size(1)
-            # Try to ensure float32 pipeline; ignore if unsupported
-            try:
-                infer_model.input().set_format_type(FormatType.FLOAT32)
-                infer_model.output().set_format_type(FormatType.FLOAT32)
-            except Exception:
-                pass
+            
+            input_names = list_input_names(infer_model)
+            output_names = list_output_names(infer_model)
+            
+            for n in input_names:
+                io_set_format(infer_model, True, n, FormatType.FLOAT32)
+            for n in output_names:
+                io_set_format(infer_model, False, n, FormatType.FLOAT32)
 
-            with infer_model.configure() as configured:
+            with infer_model.configure() as cmodel:
                 while True:
                     face = self.in_q.get()
                     if face is None:
@@ -130,20 +155,22 @@ class HailoInferProc(Process):
                     inp = self._prep(face)
 
                     # Bindings
-                    bindings = configured.create_bindings()
-                    bindings.input().set_buffer(inp)
+                    bindings = cmodel.create_bindings()
+                    
+                    for n in input_names:
+                        shape = io_shape(infer_model, True, n)
+                        bindings_set_buffer(bindings, True, n, inp)
+                    
+                    for n in output_names:
+                        shape = io_shape(infer_model, False, n)
+                        out_buf = np.empty(shape, dtype=np.float32)
+                        bindings_set_buffer(bindings, False, n, out_buf)
 
-                    # Handle one-output by default; try to support multi-outputs as contiguous buffer if needed
-                    out_shape = infer_model.output().shape
-   
-                    out_buf = np.empty(out_shape, dtype=np.float32)
-                    out_buf = np.expand_dims(out_buf, 0)  # (1,H,W,3)
-                    print(out_buf.shape)
-
-                    bindings.output().set_buffer(out_buf)
-
-                    configured.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    job = configured.run_async([bindings], lambda completion_info, b=bindings: self._cb(completion_info, b))
+                    cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
+                    job = cmodel.run_async(
+                        [bindings],
+                        partial(HailoInferProc._cb, bindings=bindings)
+                    )
                     job.wait(self.timeout_ms)
 
                     # Read outputs (single output path)
