@@ -82,7 +82,7 @@ class HailoInferProc(Process):
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
     def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
         """Chuẩn hoá input theo expected_shape (NCHW hoặc NHWC). Trả float32."""
-
+        print(f'{self.model_type} - {face_rgb.shape} - {expected_shape}')
         H, W = expected_shape[0], expected_shape[1]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
         img = np.expand_dims(img, 0)  # (1,H,W,3)
