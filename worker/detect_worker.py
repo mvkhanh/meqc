@@ -52,7 +52,6 @@ class HailoInferProc(Process):
         """Prepare input tensor based on input_shape: supports NHWC or NCHW.
         Returned dtype float32 in range [0,1]."""
         # Expected shape includes batch dim
-        print(f'Face rgb shape: {face_rgb.shape}')
 
         H, W = HailoInferProc.INPUT_SIZE_MAP[self.model_type]
         img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
@@ -127,13 +126,8 @@ class HailoInferProc(Process):
                     face = self.in_q.get()
                     if face is None:
                         break
-                    try:
-                        inp = self._prep(face)
-                    except Exception:
-                        # fallback naive NHWC 224x224
-                        print('Fallback preprocess')
-                        img = cv2.resize(face, (224, 224)).astype(np.float32) / 255.0
-                        inp = np.expand_dims(img, 0)
+
+                    inp = self._prep(face)
 
                     # Bindings
                     bindings = configured.create_bindings()
@@ -141,6 +135,7 @@ class HailoInferProc(Process):
 
                     # Handle one-output by default; try to support multi-outputs as contiguous buffer if needed
                     out_shape = infer_model.output().shape
+                    print(out_shape)
                     out_buf = np.empty(out_shape, dtype=np.float32)
                     bindings.output().set_buffer(out_buf)
 
