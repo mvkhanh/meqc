@@ -184,6 +184,7 @@ class HailoInferProc(Process):
         Returns a dict depending on model_type.
         """
         out_arrs = np.asarray(out_arrs)
+        print(f'{self.model_type} - Shape: {out_arrs.shape} - {out_arrs}')
         if self.model_type == 'emotion':
             # Assume logits vector for 7 emotions
             EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
