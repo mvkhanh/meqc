@@ -137,6 +137,8 @@ class HailoInferProc(Process):
                     out_shape = infer_model.output().shape
                     print(out_shape)
                     out_buf = np.empty(out_shape, dtype=np.float32)
+                    out_buf = np.expand_dims(out_buf, 0)  # (1,H,W,3)
+
                     bindings.output().set_buffer(out_buf)
 
                     configured.wait_for_async_ready(timeout_ms=self.timeout_ms)
