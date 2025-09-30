@@ -170,7 +170,7 @@ class HailoInferProc(Process):
         print(f'{self.model_type} - Shape: {out_arrs.shape} - {out_arrs}')
         if self.model_type == 'emotion':
             # Assume logits vector for 7 emotions
-            EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+            EMO_LABELS = ['Angry', 'Fear', 'Happiness', 'Sad', 'Surprise', 'Neutral']
             vec = out_arrs[0].reshape(-1)
             if vec.size == 0:
                 return {"emotion": None, "emotion_conf": None}
