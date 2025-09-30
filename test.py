@@ -9,14 +9,12 @@ from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType
 # ---------- Helpers ----------
 def list_input_names(im):
     """Trả về list tên input. Có fallback cho API khác nhau."""
-    if hasattr(im, "get_input_names"):
-        print('Have get_input_names')
-        return list(im.get_input_names())
     if hasattr(im, "inputs"):
         try:
             return list(im.inputs.keys())            # dict-like
         except Exception:
             try:
+                print("Here")
                 return [x.name for x in im.inputs]   # list of objects
             except Exception:
                 pass
@@ -26,8 +24,6 @@ def list_input_names(im):
 
 def list_output_names(im):
     """Trả về list tên output. Có fallback cho API khác nhau."""
-    if hasattr(im, "get_output_names"):
-        return list(im.get_output_names())
     if hasattr(im, "outputs"):
         try:
             return list(im.outputs.keys())
