@@ -114,6 +114,28 @@ def main(args):
         else:
             cv2.destroyAllWindows()
         
+        # Graceful shutdown of workers
+        try:
+            detect_worker.stop()
+        except Exception:
+            pass
+        try:
+            capture_worker.stop()
+        except Exception:
+            pass
+
+        # Join and, if needed, terminate
+        for p in (detect_worker, capture_worker):
+            try:
+                p.join(timeout=1.0)
+            except Exception:
+                pass
+            try:
+                if p.is_alive():
+                    p.terminate()
+            except Exception:
+                pass
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Raspberry Pi 5 Realtime Client")
     
