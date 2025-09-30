@@ -183,6 +183,7 @@ class HailoInferProc(Process):
         out_arrs: list[np.ndarray] (one or more outputs).
         Returns a dict depending on model_type.
         """
+        out_arrs = np.asarray(out_arrs)
         if self.model_type == 'emotion':
             # Assume logits vector for 7 emotions
             EMO_LABELS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
@@ -261,7 +262,7 @@ class HailoInferProc(Process):
                         out_fmt   = get_io_fmt(out_io)
                         out_dtype = fmt_to_dtype(out_fmt)
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.float32)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=out_dtype)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
