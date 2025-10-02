@@ -382,7 +382,7 @@ class DetectWorker(Process):
 
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
                                   in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None,
-                 recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.8,
+                 recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45,
                  recog_db_path: Optional[str] = None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
