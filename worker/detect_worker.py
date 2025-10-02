@@ -98,7 +98,7 @@ class _FaissDB:
 class FaceRecognizer:
     """ONNX embedding + FAISS DB wrapper."""
     def __init__(self, onnx_path: str, sim_thres: float = 0.45,
-                 providers=("CUDAExecutionProvider", "CPUExecutionProvider")):
+                 providers=("CPUExecutionProvider",)):
         self.sess = ort.InferenceSession(onnx_path, providers=list(providers))
         self.in_name = self.sess.get_inputs()[0].name
         self.out_names = [o.name for o in self.sess.get_outputs()]
