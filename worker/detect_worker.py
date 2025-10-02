@@ -203,19 +203,12 @@ class HailoInferProc(Process):
                         out_shape = io_shape(infer_model, False, n)
                         out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
                         bindings_set_buffer(bindings, False, n, out_buf)
-                        
-                    try:
-                        cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
-                    except Exception:
-                        print(f"[{self.model_type}] async_ready timeout -> skip")
-                        continue
+                    
+                    cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
                     
                     job = cmodel.run_async([bindings], partial(self._cb, bindings=bindings))
-                    try:
-                        job.wait(self.timeout_ms)
-                    except Exception:
-                        print(f"[{self.model_type}] job.wait timeout -> skip")
-                        continue
+
+                    job.wait(self.timeout_ms)
 
                     out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
                     out_deq = [self._dequant_output(n, arr) for n, arr in zip(output_names, out_raw)]
