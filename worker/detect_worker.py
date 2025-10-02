@@ -646,7 +646,7 @@ class DetectWorker(Process):
                             self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
                             self.shared["result"]["ts"] = now
                             # If eye contact detected, enqueue latest face for recognition (dedupe by face_ver)
-                            if self._recog_q is not None and ec:
+                            if self._recog_q is not None:
                                 face_rgb2 = self.shared["latest_face"]
                                 ver2 = self.shared["face_ver"]
                                 if face_rgb2 is not None and ver2 != last_recog_ver:
