@@ -123,6 +123,8 @@ class HailoInferProc(Process):
         out_arrs: list[np.ndarray] (one or more outputs).
         Returns a dict depending on model_type.
         """
+        if self.model_type == 'agegender':
+            print(out_arrs)
         out_arrs = np.asarray(out_arrs)
         if self.model_type == 'emotion':
             # Assume logits vector for 7 emotions
@@ -151,7 +153,7 @@ class HailoInferProc(Process):
             }
         
         else:  # agegender
-            g = float(np.asarray(out_arrs[0]).squeeze())
+            g = float(np.asarray(out_arrs[2]).squeeze())
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
             prob_female = 1.0 / (1.0 + np.exp(-g))
             if prob_female >= 0.5:
