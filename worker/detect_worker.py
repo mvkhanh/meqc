@@ -7,7 +7,7 @@ import math
 from functools import partial
 from utils import submit, poll, _softmax
 from time import time, sleep
-from threading import Thread, Lock
+from threading import Lock
 from model.face_detector import YuNetFaceDetector
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, HEF
 
@@ -325,92 +325,6 @@ class DetectWorker(Process):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
         return frame_bgr
 
-    def _agegender_loop(self):
-        if self._ag_in is None or self._ag_out is None:
-            return
-        last_ver = -1
-        from queue import Empty
-        while not self._stop.is_set():
-            with self.shared["lock"]:
-                ver = self.shared["face_ver"]
-                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
-            if face is not None:
-                submit(self._ag_in, face)
-                last_ver = ver
-            # Non-blocking fetch result
-            try:
-                res = self._ag_out.get_nowait()
-                with self.shared["lock"]:
-                    dst = self.shared["result"]
-                    dst["age"] = res.get("age")
-                    dst["gender"] = res.get("gender")
-                    dst["gender_conf"] = res.get("gender_conf")
-                    dst["ts"] = time()
-            except Empty:
-                pass
-            sleep(0.003)
-
-    def _emotion_loop(self):
-        if self._emo_in is None or self._emo_out is None:
-            return
-        last_ver = -1
-        from queue import Empty
-        while not self._stop.is_set():
-            with self.shared["lock"]:
-                ver = self.shared["face_ver"]
-                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
-            if face is not None:
-                submit(self._emo_in, face)
-                last_ver = ver
-            # Non-blocking fetch result
-            try:
-                res = self._emo_out.get_nowait()
-                with self.shared["lock"]:
-                    dst = self.shared["result"]
-                    dst["emotion"] = res.get("emotion")
-                    dst["emotion_conf"] = res.get("emotion_conf")
-                    dst["ts"] = time()
-            except Empty:
-                pass
-            sleep(0.003)
-            
-    def _gaze_loop(self):
-        if self._gaze_in is None or self._gaze_out is None:
-            return
-        last_ver = -1
-        from queue import Empty
-        while not self._stop.is_set():
-            # Grab latest face when it changes
-            with self.shared["lock"]:
-                ver = self.shared["face_ver"]
-                face = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None and ver != last_ver) else None
-            if face is not None:
-                submit(self._gaze_in, face)
-                last_ver = ver
-            # Non-blocking result read
-            try:
-                res = self._gaze_out.get_nowait()  # expected dict from HailoInferProc (gaze)
-                now = time()
-                with self.shared["lock"]:
-                    # Update dwell timer
-                    if isinstance(res, dict):
-                        ec = bool(res.get("eye_contact", False))
-                        if ec:
-                            if not self.shared.get("eye_on_since"):
-                                self.shared["eye_on_since"] = now
-                            dwell = now - (self.shared["eye_on_since"] or now)
-                        else:
-                            self.shared["eye_on_since"] = 0.0
-                            dwell = 0.0
-                        self.shared["result"]["eye_contact"] = ec
-                        self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
-                        self.shared["result"]["ts"] = now
-            except Empty:
-                pass
-
-            sleep(0.003)
-
-
     # -------------------- Main process loop --------------------
     def run(self):
         # Shared state inside this (DetectWorker) process
@@ -458,16 +372,10 @@ class DetectWorker(Process):
         else:
             raise FileNotFoundError(f'Not found {self.gaze_path}')
 
-        # Background threads that feed face crops to the subprocesses and pull results back
-        ag_thread = Thread(target=self._agegender_loop, daemon=True)
-        if self._ag_proc is not None:
-            ag_thread.start()
-        em_thread = Thread(target=self._emotion_loop, daemon=True)
-        if self._emo_proc is not None:
-            em_thread.start()
-        gaze_thread = Thread(target=self._gaze_loop, daemon=True)
-        if self._gaze_proc is not None:
-            gaze_thread.start()
+        # Track last face version submitted to each model
+        last_ag_ver = -1
+        last_emo_ver = -1
+        last_gaze_ver = -1
 
         # Main loop: receive frame, (periodically) detect -> update crop + draw overlay
         while not self._stop.is_set():
@@ -494,6 +402,67 @@ class DetectWorker(Process):
                     with self.shared["lock"]:
                         self.shared["last_box"] = None
 
+            # Push latest face to subprocesses (only when face version changes) and pull results
+            with self.shared["lock"]:
+                ver = self.shared["face_ver"]
+                face_rgb = self.shared["latest_face"].copy() if (self.shared["latest_face"] is not None) else None
+
+            if face_rgb is not None:
+                if self._ag_in is not None and ver != last_ag_ver:
+                    submit(self._ag_in, face_rgb)
+                    last_ag_ver = ver
+                if self._emo_in is not None and ver != last_emo_ver:
+                    submit(self._emo_in, face_rgb)
+                    last_emo_ver = ver
+                if self._gaze_in is not None and ver != last_gaze_ver:
+                    submit(self._gaze_in, face_rgb)
+                    last_gaze_ver = ver
+
+            # Try to read outputs without blocking
+            from queue import Empty
+            try:
+                if self._ag_out is not None:
+                    res = self._ag_out.get_nowait()
+                    with self.shared["lock"]:
+                        dst = self.shared["result"]
+                        dst["age"] = res.get("age")
+                        dst["gender"] = res.get("gender")
+                        dst["gender_conf"] = res.get("gender_conf")
+                        dst["ts"] = time()
+            except Empty:
+                pass
+
+            try:
+                if self._emo_out is not None:
+                    res = self._emo_out.get_nowait()
+                    with self.shared["lock"]:
+                        dst = self.shared["result"]
+                        dst["emotion"] = res.get("emotion")
+                        dst["emotion_conf"] = res.get("emotion_conf")
+                        dst["ts"] = time()
+            except Empty:
+                pass
+
+            try:
+                if self._gaze_out is not None:
+                    res = self._gaze_out.get_nowait()
+                    now = time()
+                    if isinstance(res, dict):
+                        with self.shared["lock"]:
+                            ec = bool(res.get("eye_contact", False))
+                            if ec:
+                                if not self.shared.get("eye_on_since"):
+                                    self.shared["eye_on_since"] = now
+                                dwell = now - (self.shared["eye_on_since"] or now)
+                            else:
+                                self.shared["eye_on_since"] = 0.0
+                                dwell = 0.0
+                            self.shared["result"]["eye_contact"] = ec
+                            self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
+                            self.shared["result"]["ts"] = now
+            except Empty:
+                pass
+
             # Always draw overlay from shared results
             out = self._draw_overlay(frame_bgr)
             t1 = time()
@@ -501,24 +470,6 @@ class DetectWorker(Process):
                 print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
             submit(self.out_q, out)
             self.frame_idx += 1
-
-        # Cleanup
-        try:
-            if ag_thread.is_alive():
-                ag_thread.join(timeout=0.1)
-        except Exception:
-            pass
-        try:
-            if em_thread.is_alive():
-                em_thread.join(timeout=0.1)
-        except Exception:
-            pass
-        try:
-            if gaze_thread.is_alive():
-                gaze_thread.join(timeout=0.1)
-        except Exception:
-            pass
-        
 
         # Tell subprocesses to stop
         try:
