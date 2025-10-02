@@ -123,7 +123,7 @@ class HailoInferProc(Process):
             vec = out_arrs[0].reshape(-1)
             if vec.size == 0:
                 return {"emotion": None, "emotion_conf": None}
-            prob = self._softmax(vec)
+            prob = _softmax(vec)
             idx = int(prob.argmax())
             conf = float(prob[idx])
             label = EMO_LABELS[idx] if idx < len(EMO_LABELS) else f"cls_{idx}"
@@ -149,7 +149,7 @@ class HailoInferProc(Process):
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
             # prob_female = 1.0 / (1.0 + np.exp(-g))
             
-            probs = self._softmax(g)
+            probs = _softmax(g)
             prob_female = float(probs[1])
             if prob_female >= 0.5:
                 gender_label = "Female"
