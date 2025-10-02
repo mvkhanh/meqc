@@ -255,6 +255,7 @@ class HailoInferProc(Process):
             }
         
         else:  # agegender
+            print(out_arrs)
             g = np.asarray(out_arrs[2]).squeeze()
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
             # prob_female = 1.0 / (1.0 + np.exp(-g))
