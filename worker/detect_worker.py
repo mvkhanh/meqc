@@ -7,20 +7,9 @@ import math
 from functools import partial
 from utils import submit, poll, _softmax
 from time import time, sleep
-from threading import Lock, Thread
+from threading import Lock
 from model.face_detector import YuNetFaceDetector
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, HEF
-
-# -------------------- Face Recognition (ONNX + FAISS) --------------------
-import onnxruntime as ort
-from torchvision import transforms
-from face_alignment import align
-try:
-    import faiss  # faiss-cpu or faiss-gpu
-except Exception:
-    faiss = None
-import queue as tqueue
-from PIL import Image
 
 # ---------- Helpers ----------
 def list_input_names(im):
@@ -49,111 +38,6 @@ def bindings_set_buffer(bindings, is_input, name, buf):
 def bindings_get_buffer(bindings, name):
     """Lấy buffer output theo tên (hoặc None nếu single)."""
     return (bindings.output(name) if name is not None else bindings.output()).get_buffer()
-
-# -------------------- Face Recognition (ONNX + FAISS) --------------------
-class _FaissDB:
-    """Minimal FAISS-backed DB with cosine similarity (via inner product on L2-normalized vectors).
-    Falls back to NumPy if faiss is unavailable.
-    """
-    def __init__(self, dim: int):
-        self.dim = dim
-        self.ids = []  # index -> person_id
-        self.next_id = 1
-        self._use_faiss = faiss is not None
-        self.index = faiss.IndexFlatIP(dim)
-
-    def add(self, vec: np.ndarray) -> int:
-        assert vec.shape == (1, self.dim)
-        pid = self.next_id
-        self.next_id += 1
-        self.index.add(vec)
-        self.ids.append(pid)
-        return pid
-
-    def search(self, vec: np.ndarray, topk: int = 1):
-        if self.index.ntotal == 0:
-            return None
-        D, I = self.index.search(vec, topk)
-        sim = float(D[0][0])
-        idx = int(I[0][0])
-        if idx < 0:
-            return None
-        return self.ids[idx], sim
-
-class FaceRecognizer:
-    """ONNX embedding + FAISS DB wrapper."""
-    def __init__(self, onnx_path: str, sim_thres: float = 0.45,
-                 providers=("CPUExecutionProvider",)):
-        self.sess = ort.InferenceSession(onnx_path, providers=list(providers))
-        self.in_name = self.sess.get_inputs()[0].name
-        self.out_names = [o.name for o in self.sess.get_outputs()]
-        self.sim_thres = float(sim_thres)
-        # preprocessing identical to PyTorch code
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        ])
-        self.db = None  # _FaissDB, lazily created after first embedding
-
-    def _preprocess(self, face_rgb: np.ndarray) -> np.ndarray:
-        # align.get_aligned_face may accept PIL or ndarray
-        img = Image.fromarray(face_rgb) if not isinstance(face_rgb, Image.Image) else face_rgb
-        try:
-            aligned = align.get_aligned_face(img)
-            if isinstance(aligned, np.ndarray):
-                aligned = Image.fromarray(aligned)
-        except Exception:
-            aligned = img  # fallback if align fails
-        x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
-        return np.ascontiguousarray(x)
-
-    def embed(self, face_rgb: np.ndarray) -> np.ndarray:
-        inp = self._preprocess(face_rgb)
-        outs = self.sess.run(self.out_names, {self.in_name: inp})
-        emb = outs[0].astype(np.float32)
-        # L2 normalize
-        emb = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
-        if self.db is None:
-            self.db = _FaissDB(dim=emb.shape[1])
-        return emb
-
-    def identify_or_enroll(self, face_rgb: np.ndarray):
-        emb = self.embed(face_rgb)
-        hit = self.db.search(emb, topk=1)
-        if hit is not None:
-            pid, sim = hit
-            if sim >= self.sim_thres:
-                return pid, sim, False  # recognized
-        # enroll new ID
-        pid = self.db.add(emb)
-        return pid, 1.0, True
-
-class RecogThread(Thread):
-    """Thread that consumes face crops and updates shared state with person_id."""
-    def __init__(self, in_q: tqueue.Queue, shared: dict, stop_event,
-                 onnx_path: str, sim_thres: float = 0.45):
-        super().__init__(daemon=True)
-        self.in_q = in_q
-        self.shared = shared
-        self.stop_event = stop_event
-        self.recog = FaceRecognizer(onnx_path, sim_thres)
-
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                item = self.in_q.get(timeout=0.1)
-            except tqueue.Empty:
-                continue
-            if item is None:
-                break
-            try:
-                pid, sim, is_new = self.recog.identify_or_enroll(item)
-                with self.shared["lock"]:
-                    self.shared["result"]["person_id"] = int(pid)
-                    self.shared["result"]["ts"] = time()
-            except Exception as e:
-                # best-effort; keep thread alive
-                print(f"[recog] error: {e}")
 
 class HailoInferProc(Process):
     """
@@ -214,48 +98,17 @@ class HailoInferProc(Process):
         scale, zp = self.out_qp.get(name, (1.0, 0.0))
         return (arr.astype(np.float32) - zp) * scale
     
+    # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
     def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
         """
-        Return a contiguous NHWC uint8 buffer that matches expected_shape.
-        Supports expected_shape being either (H,W,C) or (N,H,W,C)/(H,W,C,N) with N in {0,1}.
+        Trả về buffer đúng y 'expected_shape' của infer_model.input(name).shape
+        và đúng dtype (uint8/float32...). Không tự động thêm batch khi không có.
         """
         es = tuple(int(x) for x in expected_shape)
-        # Extract H, W, C robustly
-        if len(es) == 3:
-            H, W, C = es
-        elif len(es) == 4:
-            # Assume batch dimension present; take the last 3 dims as HWC if plausible
-            # Common Hailo NHWC: (N,H,W,C). Guard for (H,W,C,N) as well.
-            if es[0] in (0, 1) and es[1] > 0 and es[2] > 0 and es[3] in (1, 3):
-                H, W, C = es[1], es[2], es[3]
-            elif es[3] in (0, 1) and es[0] > 0 and es[1] > 0 and es[2] in (1, 3):
-                H, W, C = es[0], es[1], es[2]
-            else:
-                # Fallback: last 3 dims
-                H, W, C = es[-3], es[-2], es[-1]
-        else:
-            raise ValueError(f"Unsupported input shape: {es}")
 
-        # Sanity fallback for invalid dims
-        if H <= 0 or W <= 0 or C not in (1, 3):
-            raise ValueError(f"Bad expected input dims: {es}")
-
-        # Resize and convert to needed channels
-        img = face_rgb
-        if img.ndim == 2:
-            img = img[..., None]
-        if img.shape[2] == 3 and C == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
-        elif img.shape[2] == 1 and C == 3:
-            img = np.repeat(img, 3, axis=2)
-        img = cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)
-
-        out = np.ascontiguousarray(img, dtype=np.uint8)
-        # Final guard — ensure size matches
-        if out.size != (H * W * C):
-            # Return an empty array to indicate failure; caller will handle
-            return np.empty((0,), dtype=np.uint8)
-        return out
+        H, W, C = es
+        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+        return img.astype(np.uint8)
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -340,35 +193,15 @@ class HailoInferProc(Process):
                     bindings = cmodel.create_bindings()
 
                     # Inputs
-                    bad_input = False
                     for n in input_names:
                         in_shape = io_shape(infer_model, True, n)
                         in_buf   = self._prep(face, in_shape)
-                        # Validate buffer
-                        try:
-                            es = tuple(int(x) for x in in_shape)
-                            if len(es) == 3:
-                                exp_elems = es[0]*es[1]*es[2]
-                            elif len(es) == 4:
-                                exp_elems = es[-3]*es[-2]*es[-1]
-                            else:
-                                exp_elems = 0
-                        except Exception:
-                            exp_elems = 0
-                        if in_buf.size != exp_elems:
-                            print(f"[{self.model_type}] bad input buffer for '{n}': got {in_buf.size} elems, expect {exp_elems} from shape {in_shape}")
-                            bad_input = True
-                            break
                         bindings_set_buffer(bindings, True, n, in_buf)
-
-                    if bad_input:
-                        continue
 
                     # Outputs
                     for n in output_names:
                         out_shape = io_shape(infer_model, False, n)
-                        # Most Hailo post-quant outputs are u8; keep u8 then dequantize
-                        out_buf   = np.zeros(tuple(int(x) for x in out_shape), dtype=np.uint8)
+                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
                         bindings_set_buffer(bindings, False, n, out_buf)
                         
                     try:
@@ -402,8 +235,7 @@ class DetectWorker(Process):
     """
 
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
-                 in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None,
-                 recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45):
+                 in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
         self.detector = None
@@ -437,12 +269,6 @@ class DetectWorker(Process):
         self._emo_proc = None
         self._gaze_proc = None
 
-        self.recog_onnx_path = recog_onnx_path
-        self.recog_sim_thres = float(recog_sim_thres)
-        self._recog_q = None  # thread queue
-        self._recog_thr = None
-        self._last_recog_ver = -1
-
     # -------------------- Helper --------------------
     @staticmethod
     def _largest_box(boxes):
@@ -472,9 +298,6 @@ class DetectWorker(Process):
 
         # Chuẩn bị text
         parts = []
-        pid = res.get("person_id")
-        if pid is not None:
-            parts.append(f"ID#{pid}")
         if res.get("gender") is not None:
             if res.get("gender_conf") is not None:
                 parts.append(f"{res['gender']} {int(round(res['gender_conf']*100))}%")
@@ -528,7 +351,6 @@ class DetectWorker(Process):
                 "ts": 0.0,
                 "eye_contact": None,
                 "eye_contact_dwell": 0.0,
-                "person_id": None,
             },
             "eye_on_since": 0.0,
         }
@@ -559,21 +381,10 @@ class DetectWorker(Process):
         else:
             raise FileNotFoundError(f'Not found {self.gaze_path}')
 
-        # Start face recognition thread (ONNX + FAISS)
-        if self.recog_onnx_path and os.path.exists(self.recog_onnx_path):
-            self._recog_q = tqueue.Queue(maxsize=1)
-            self._recog_thr = RecogThread(self._recog_q, self.shared, self._stop,
-                                          self.recog_onnx_path, self.recog_sim_thres)
-            self._recog_thr.start()
-            print("[recog] Face recognition thread started")
-        else:
-            print(f"[recog] disabled (onnx not found: {self.recog_onnx_path})")
-
         # Track last face version submitted to each model
         last_ag_ver = -1
         last_emo_ver = -1
         last_gaze_ver = -1
-        last_recog_ver = -1
 
         # Main loop: receive frame, (periodically) detect -> update crop + draw overlay
         while not self._stop.is_set():
@@ -658,21 +469,6 @@ class DetectWorker(Process):
                             self.shared["result"]["eye_contact"] = ec
                             self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
                             self.shared["result"]["ts"] = now
-                            # If eye contact detected, enqueue latest face for recognition (dedupe by face_ver)
-                            if self._recog_q is not None and ec:
-                                face_rgb2 = self.shared["latest_face"]
-                                ver2 = self.shared["face_ver"]
-                                if face_rgb2 is not None and ver2 != last_recog_ver:
-                                    try:
-                                        # last-wins: drop stale item if queue full
-                                        try:
-                                            self._recog_q.get_nowait()
-                                        except tqueue.Empty:
-                                            pass
-                                        self._recog_q.put_nowait(face_rgb2.copy())
-                                        last_recog_ver = ver2
-                                    except tqueue.Full:
-                                        pass
             except Empty:
                 pass
 
@@ -716,22 +512,9 @@ class DetectWorker(Process):
         except Exception:
             pass
 
-        # Stop recognition thread
-        try:
-            if self._recog_q is not None:
-                self._recog_q.put_nowait(None)
-        except Exception:
-            pass
-        try:
-            if self._recog_thr is not None:
-                self._recog_thr.join(timeout=0.5)
-        except Exception:
-            pass
-
     def stop(self):
         self._stop.set()
         try:
             self.in_q.put_nowait(None)
         except Exception:
             pass
-    
