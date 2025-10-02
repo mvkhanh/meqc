@@ -1,4 +1,5 @@
 import os
+import json
 from multiprocessing import Process, Queue, Event
 from typing import Optional
 import numpy as np
@@ -6,7 +7,7 @@ import cv2
 import math
 from functools import partial
 from utils import submit, poll, _softmax
-from time import time, sleep
+from time import time
 from threading import Lock, Thread
 from model.face_detector import YuNetFaceDetector
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, HEF
@@ -52,6 +53,34 @@ class _FaissDB:
     """Minimal FAISS-backed DB with cosine similarity (via inner product on L2-normalized vectors).
     Falls back to NumPy if faiss is unavailable.
     """
+    @classmethod
+    def load(cls, path: str):
+        """Load FAISS index and metadata saved by `save`.
+        Expects two files: `{path}.index` and `{path}.json`.
+        """
+        idx = faiss.read_index(path + ".index")
+        with open(path + ".json", "r") as f:
+            meta = json.load(f)
+        dim = int(meta.get("dim", idx.d))
+        obj = cls(dim)
+        obj.index = idx
+        obj.ids = list(meta.get("ids", []))
+        obj.next_id = int(meta.get("next_id", len(obj.ids) + 1))
+        return obj
+
+    def save(self, path: str):
+        """Persist FAISS index and metadata.
+        Writes two files: `{path}.index` (FAISS) and `{path}.json` (ids/next_id/meta).
+        """
+        faiss.write_index(self.index, path + ".index")
+        meta = {
+            "ids": self.ids,
+            "next_id": self.next_id,
+            "dim": self.dim,
+            "ntotal": int(self.index.ntotal),
+        }
+        with open(path + ".json", "w") as f:
+            json.dump(meta, f)
     def __init__(self, dim: int):
         self.dim = dim
         self.ids = []  # index -> person_id
@@ -80,17 +109,27 @@ class _FaissDB:
 class FaceRecognizer:
     """ONNX embedding + FAISS DB wrapper."""
     def __init__(self, onnx_path: str, sim_thres: float = 0.45,
-                 providers=("CPUExecutionProvider",)):
+                 providers=("CPUExecutionProvider",), db_path: Optional[str] = None, autosave: bool = True):
         self.sess = ort.InferenceSession(onnx_path, providers=list(providers))
         self.in_name = self.sess.get_inputs()[0].name
         self.out_names = [o.name for o in self.sess.get_outputs()]
         self.sim_thres = float(sim_thres)
+        self.db_path = db_path
+        self.autosave = bool(autosave)
         # preprocessing identical to PyTorch code
         self.transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
-        self.db = None  # _FaissDB, lazily created after first embedding
+        # Try to load existing DB if provided
+        self.db = None  # type: Optional[_FaissDB]
+        if self.db_path and os.path.exists(self.db_path + ".index") and os.path.exists(self.db_path + ".json"):
+            try:
+                self.db = _FaissDB.load(self.db_path)
+                print(f"[recog] loaded FAISS DB: {self.db_path} (ntotal={self.db.index.ntotal})")
+            except Exception as e:
+                print(f"[recog] failed to load DB '{self.db_path}': {e}")
+                self.db = None
 
     def _preprocess(self, face_rgb: np.ndarray) -> np.ndarray:
         # align.get_aligned_face may accept PIL or ndarray
@@ -119,18 +158,24 @@ class FaceRecognizer:
                 return pid, sim, False  # recognized
         # enroll new ID
         pid = self.db.add(emb)
+        # Persist DB on each new enrollment
+        try:
+            if self.db_path and self.autosave:
+                self.db.save(self.db_path)
+        except Exception as e:
+            print(f"[recog] warning: failed to save DB: {e}")
         print(f'New person: {pid}')
         return pid, 1.0, True
 
 class RecogThread(Thread):
     """Thread that consumes face crops and updates shared state with person_id."""
     def __init__(self, in_q: tqueue.Queue, shared: dict, stop_event,
-                 onnx_path: str, sim_thres: float = 0.45):
+                 onnx_path: str, sim_thres: float = 0.45, db_path: Optional[str] = None, autosave: bool = True):
         super().__init__(daemon=True)
         self.in_q = in_q
         self.shared = shared
         self.stop_event = stop_event
-        self.recog = FaceRecognizer(onnx_path, sim_thres)
+        self.recog = FaceRecognizer(onnx_path, sim_thres, db_path=db_path, autosave=autosave)
 
     def run(self):
         while not self.stop_event.is_set():
@@ -337,7 +382,8 @@ class DetectWorker(Process):
 
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
                                   in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None,
-                 recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45):
+                 recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45,
+                 recog_db_path: Optional[str] = None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
         self.detector = None
@@ -373,6 +419,7 @@ class DetectWorker(Process):
         
         self.recog_onnx_path = recog_onnx_path
         self.recog_sim_thres = float(recog_sim_thres)
+        self.recog_db_path = recog_db_path
         self._recog_q = None  # thread queue
         self._recog_thr = None
         self._last_recog_ver = -1
@@ -499,9 +546,12 @@ class DetectWorker(Process):
         if self.recog_onnx_path and os.path.exists(self.recog_onnx_path):
             self._recog_q = tqueue.Queue(maxsize=1)
             self._recog_thr = RecogThread(self._recog_q, self.shared, self._stop,
-                                          self.recog_onnx_path, self.recog_sim_thres)
+                                          self.recog_onnx_path, self.recog_sim_thres,
+                                          db_path=self.recog_db_path, autosave=True)
             self._recog_thr.start()
             print("[recog] Face recognition thread started")
+            if self.recog_db_path:
+                print(f"[recog] DB path: {self.recog_db_path}.index/.json")
         else:
             print(f"[recog] disabled (onnx not found: {self.recog_onnx_path})")
 

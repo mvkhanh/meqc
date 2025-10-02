@@ -53,7 +53,7 @@ def main(args):
                                  face_score_thres=args.face_thres, agegender_path=args.agegender_model,
                                  width=args.width, height=args.height, in_q=in_q, out_q=out_q,
                                  emotion_path=args.emotion_model, gaze_path=args.gaze_model,
-                                 recog_onnx_path=args.face_recognition_model)
+                                 recog_onnx_path=args.face_recognition_model, recog_db_path=args.recog_db_path)
     
     capture_worker.start()
     detect_worker.start()
@@ -153,6 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--agegender-model", default='ckpt/agegender.hef', help="Tham so cua age gender")
     parser.add_argument("--gaze-model", default='ckpt/gaze.hef', help="Tham so cua gaze")
     parser.add_argument("--face-recognition-model", default='ckpt/edgeface_s_gamma_05.onnx', help="Tham so cua face recognition")
+    parser.add_argument("--recog-db-path", default='db/', help="Thu muc database")
 
     args = parser.parse_args()
       
