@@ -255,6 +255,7 @@ class HailoInferProc(Process):
             }
         
         else:  # agegender
+            print(out_arrs)
             g = np.asarray(out_arrs[2]).squeeze()
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
             # prob_female = 1.0 / (1.0 + np.exp(-g))
@@ -319,7 +320,6 @@ class HailoInferProc(Process):
                     job.wait(self.timeout_ms)
 
                     out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
-                    print(out_raw)
                     out_deq = [self._dequant_output(n, arr) for n, arr in zip(output_names, out_raw)]
 
                     # Cast sang float32 trong postprocess nếu cần:
