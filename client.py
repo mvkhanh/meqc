@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import time
+import os
 import cv2
 from multiprocessing import Process, Queue, Event
 from worker.detect_worker import DetectWorker
@@ -48,6 +49,7 @@ def main(args):
     
     in_q = Queue(maxsize=1)
     out_q = Queue(maxsize=1)
+    os.makedirs(args.recog_db_path, exist_ok=True)
     capture_worker = CaptureWorker(in_q=in_q, width=args.width, height=args.height)
     detect_worker = DetectWorker(detector_path=args.face_detection_model, detect_every_n=args.den,
                                  face_score_thres=args.face_thres, agegender_path=args.agegender_model,
