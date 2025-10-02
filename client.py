@@ -53,7 +53,7 @@ def main(args):
                                  face_score_thres=args.face_thres, agegender_path=args.agegender_model,
                                  width=args.width, height=args.height, in_q=in_q, out_q=out_q,
                                  emotion_path=args.emotion_model, gaze_path=args.gaze_model,
-                                 recog_onnx_path=args.face_recognition_model)
+                                 )
     
     capture_worker.start()
     detect_worker.start()
