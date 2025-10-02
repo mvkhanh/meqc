@@ -1,5 +1,6 @@
 import queue as pyqueue
 import imagezmq, zmq
+import numpy as np
 
 def submit(in_q, frame_bgr):
     try:
@@ -27,3 +28,10 @@ def create_sender(ip, port):
     sock.setsockopt(zmq.SNDTIMEO, 2000)      # 2s Äá»£i gá»­i
     print(f"[CLIENT] Connecting to tcp://{ip}:{port}")
     return sender
+
+def _softmax(x: np.ndarray) -> np.ndarray:
+        x = x.astype(np.float32)
+        x = x - np.max(x)
+        e = np.exp(x)
+        s = e / (np.sum(e) + 1e-9)
+        return s

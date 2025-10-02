@@ -151,6 +151,7 @@ if __name__ == "__main__":
     parser.add_argument("--emotion-model", default='ckpt/emotion.hef', help="Tham so cua emotion")
     parser.add_argument("--agegender-model", default='ckpt/agegender.hef', help="Tham so cua age gender")
     parser.add_argument("--gaze-model", default='ckpt/gaze.hef', help="Tham so cua gaze")
+    parser.add_argument("--face-recognition-model", default='ckpt/edgeface_s_gamma_05.onnx', help="Tham so cua face recognition")
 
     args = parser.parse_args()
       

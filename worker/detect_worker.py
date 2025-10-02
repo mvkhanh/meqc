@@ -5,11 +5,11 @@ import numpy as np
 import cv2
 import math
 from functools import partial
-from utils import submit, poll
+from utils import submit, poll, _softmax
 from time import time, sleep
 from threading import Thread, Lock
 from model.face_detector import YuNetFaceDetector
-from hailo_platform import VDevice, HailoSchedulingAlgorithm, FormatType, HEF
+from hailo_platform import VDevice, HailoSchedulingAlgorithm, HEF
 
 # ---------- Helpers ----------
 def list_input_names(im):
@@ -44,7 +44,7 @@ class HailoInferProc(Process):
     A dedicated *process* that owns a Hailo VDevice and runs exactly one HEF model.
     Use multi_process_service + shared group_id so multiple processes share the same Hailo8.
     It receives RGB face crops on in_q and returns parsed results on out_q.
-    model_type: 'agegender' | 'emotion'
+    model_type: 'agegender' | 'emotion' | 'gaze'
     """
 
     def __init__(self, hef_path: str, model_type: str, in_q: Queue, out_q: Queue,
@@ -60,21 +60,13 @@ class HailoInferProc(Process):
 
     # ---------- helpers ----------
     @staticmethod
-    def _softmax(x: np.ndarray) -> np.ndarray:
-        x = x.astype(np.float32)
-        x = x - np.max(x)
-        e = np.exp(x)
-        s = e / (np.sum(e) + 1e-9)
-        return s
-    
-    @staticmethod
     def decode_gaze3Gaze_bins(pitch_logits, yaw_logits):
         GAZE_BINS = 90
         GAZE_BINWIDTH = 4.0
         GAZE_ANGLE = 180.0
         idx = np.arange(GAZE_BINS, dtype=np.float32)[None, :]
-        p_pitch = HailoInferProc._softmax(pitch_logits)
-        p_yaw = HailoInferProc._softmax(yaw_logits)
+        p_pitch = _softmax(pitch_logits)
+        p_yaw = _softmax(yaw_logits)
         pitch_deg = float(np.sum(p_pitch * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         yaw_deg = float(np.sum(p_yaw * idx, axis=1)[0] * GAZE_BINWIDTH - GAZE_ANGLE)
         return yaw_deg, pitch_deg
@@ -139,7 +131,7 @@ class HailoInferProc(Process):
         
         elif self.model_type == 'gaze':
             out_arrs = np.asarray(out_arrs)
-            EYE_CONTACT_THRESH_DEG = 12.0
+            EYE_CONTACT_THRESH_DEG = 20.0
             pitch_logits = out_arrs[0]
             yaw_logits = out_arrs[1]
             yaw_deg, pitch_deg = HailoInferProc.decode_gaze3Gaze_bins(pitch_logits, yaw_logits)
@@ -302,18 +294,21 @@ class DetectWorker(Process):
                 parts.append(f"{res['gender']} {int(round(res['gender_conf']*100))}%")
             else:
                 parts.append(f"{res['gender']}")
+                
         if res.get("age") is not None:
             parts.append(f"{int(round(res['age']))}y")
+            
         if res.get("emotion") is not None:
             if res.get("emotion_conf") is not None:
                 parts.append(f"{res['emotion']} {int(round(res['emotion_conf']*100))}%")
             else:
                 parts.append(f"{res['emotion']}")
-                # Eye contact info
+                
+        # Eye contact info
         dwell = res.get("eye_contact_dwell")
         ec = res.get("eye_contact")
         if dwell is not None and dwell > 0:
-            tag = "Eye✓" if (ec and dwell >= 3.0) else "Eye"
+            tag = "Eye+" if (ec and dwell >= 3.0) else "Eye"
             parts.append(f"{tag} {dwell:.1f}s")
         text = " | ".join(parts)
 
