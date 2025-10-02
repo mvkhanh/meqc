@@ -99,16 +99,67 @@ class HailoInferProc(Process):
         return (arr.astype(np.float32) - zp) * scale
     
     # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
-    def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
-        """
-        Trả về buffer đúng y 'expected_shape' của infer_model.input(name).shape
-        và đúng dtype (uint8/float32...). Không tự động thêm batch khi không có.
+    def _prep(self, face_rgb: np.ndarray, expected_shape, want_dtype=np.uint8) -> np.ndarray:
+        """Return a *contiguous* numpy buffer matching expected_shape.
+        Supports [H,W,C], [N,H,W,C] (N ignored -> 1), or [L] (flat) tensors.
+        Never returns size 0; falls back to zeros if input is invalid.
         """
         es = tuple(int(x) for x in expected_shape)
+        # Guard invalid input
+        if face_rgb is None or face_rgb.size == 0:
+            # Create zeros with target shape
+            if len(es) == 3:
+                H, W, C = es
+                return np.zeros((H, W, C), dtype=want_dtype)
+            if len(es) == 4:
+                _, H, W, C = es
+                return np.zeros((H, W, C), dtype=want_dtype)
+            if len(es) == 1:
+                L = es[0]
+                return np.zeros((L,), dtype=want_dtype)
 
-        H, W, C = es
-        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        return img.astype(np.uint8)
+        # Normalize to H, W, C
+        if len(es) == 3:
+            H, W, C = es
+        elif len(es) == 4:
+            # (N,H,W,C) -> ignore batch
+            _, H, W, C = es
+        elif len(es) == 1:
+            # Flat buffer length only
+            H = W = None
+            C = es[0]
+        else:
+            raise ValueError(f"Unsupported input shape: {es}")
+
+        try:
+            if H is not None and W is not None and C in (1, 3, 4):
+                img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
+                if img.ndim == 2 and C == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                elif img.ndim == 3 and img.shape[2] != C:
+                    # Adjust channels if needed
+                    if C == 1:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
+                    elif img.shape[2] == 4 and C == 3:
+                        img = img[..., :3]
+                arr = img.astype(want_dtype, copy=False)
+            else:
+                # Only length known -> flatten resized square if possible
+                arr = face_rgb.astype(want_dtype, copy=False).ravel()
+                need = C
+                if arr.size < need:
+                    pad = np.zeros((need - arr.size,), dtype=want_dtype)
+                    arr = np.concatenate([arr, pad], axis=0)
+                arr = arr[:need]
+                return np.ascontiguousarray(arr)
+        except Exception:
+            # Fallback to zeros on any resize/conversion issue
+            if H is not None and W is not None and C:
+                arr = np.zeros((H, W, C), dtype=want_dtype)
+            else:
+                arr = np.zeros((C,), dtype=want_dtype)
+
+        return np.ascontiguousarray(arr)
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -180,11 +231,11 @@ class HailoInferProc(Process):
         with VDevice(params) as vdevice:
             infer_model = vdevice.create_infer_model(self.hef_path)
             infer_model.set_batch_size(1)
-            
-            input_names = list_input_names(infer_model)
-            output_names = list_output_names(infer_model)
 
+            # Use cmodel to query input/output names
             with infer_model.configure() as cmodel:
+                input_names = list_input_names(cmodel)
+                output_names = list_output_names(cmodel)
                 while True:
                     face = self.in_q.get()
                     if face is None:
@@ -192,26 +243,39 @@ class HailoInferProc(Process):
 
                     bindings = cmodel.create_bindings()
 
+                    # Keep references alive until after job.wait()
+                    _alive_in = {}
+                    _alive_out = {}
+
                     # Inputs
                     for n in input_names:
-                        in_shape = io_shape(infer_model, True, n)
-                        in_buf   = self._prep(face, in_shape)
+                        in_shape = io_shape(cmodel, True, n)
+                        in_buf = self._prep(face, in_shape)
+                        in_buf = np.ascontiguousarray(in_buf)
                         bindings_set_buffer(bindings, True, n, in_buf)
+                        _alive_in[n] = in_buf
 
                     # Outputs
                     for n in output_names:
-                        out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
+                        out_shape = io_shape(cmodel, False, n)
+                        out_buf = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
+                        out_buf = np.ascontiguousarray(out_buf)
                         bindings_set_buffer(bindings, False, n, out_buf)
+                        _alive_out[n] = out_buf
 
+                    # Defensive guard: skip if any input buffer is empty
+                    if any(buf.size == 0 for buf in _alive_in.values()):
+                        continue
+
+                    # Run
                     cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
                     job = cmodel.run_async([bindings], partial(self._cb, bindings=bindings))
                     job.wait(self.timeout_ms)
 
-                    out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
+                    # Read & dequantize using our live buffers
+                    out_raw = [_alive_out[n] for n in output_names]
                     out_deq = [self._dequant_output(n, arr) for n, arr in zip(output_names, out_raw)]
 
-                    # Cast sang float32 trong postprocess nếu cần:
                     result = self._postprocess(out_deq)
                     self.out_q.put(result)
 
