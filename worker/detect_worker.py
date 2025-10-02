@@ -125,9 +125,10 @@ class HailoInferProc(Process):
         """
         if self.model_type == 'agegender':
             print(out_arrs)
-        out_arrs = np.asarray(out_arrs)
+        
         if self.model_type == 'emotion':
             # Assume logits vector for 7 emotions
+            out_arrs = np.asarray(out_arrs)
             EMO_LABELS = ['Angry', 'Fear', 'Happiness', 'Sad', 'Surprise', 'Neutral']
             vec = out_arrs[0].reshape(-1)
             if vec.size == 0:
@@ -139,6 +140,7 @@ class HailoInferProc(Process):
             return {"emotion": label, "emotion_conf": conf}
         
         elif self.model_type == 'gaze':
+            out_arrs = np.asarray(out_arrs)
             EYE_CONTACT_THRESH_DEG = 12.0
             pitch_logits = out_arrs[0]
             yaw_logits = out_arrs[1]
@@ -155,7 +157,10 @@ class HailoInferProc(Process):
         else:  # agegender
             g = float(np.asarray(out_arrs[2]).squeeze())
             age_raw = float(np.asarray(out_arrs[1]).squeeze())
-            prob_female = 1.0 / (1.0 + np.exp(-g))
+            # prob_female = 1.0 / (1.0 + np.exp(-g))
+            
+            probs = self._softmax(g)
+            prob_female = float(probs[1])
             if prob_female >= 0.5:
                 gender_label = "Female"
                 gender_conf = prob_female
