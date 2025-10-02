@@ -60,40 +60,25 @@ class _FaissDB:
         self.ids = []  # index -> person_id
         self.next_id = 1
         self._use_faiss = faiss is not None
-        if self._use_faiss:
-            self.index = faiss.IndexFlatIP(dim)
-        else:
-            self.index = None
-            self.gallery = np.zeros((0, dim), dtype=np.float32)
+        self.index = faiss.IndexFlatIP(dim)
 
     def add(self, vec: np.ndarray) -> int:
         assert vec.shape == (1, self.dim)
         pid = self.next_id
         self.next_id += 1
-        if self._use_faiss:
-            self.index.add(vec)
-        else:
-            self.gallery = np.vstack([self.gallery, vec])
+        self.index.add(vec)
         self.ids.append(pid)
         return pid
 
     def search(self, vec: np.ndarray, topk: int = 1):
-        if self._use_faiss:
-            if self.index.ntotal == 0:
-                return None
-            D, I = self.index.search(vec, topk)
-            sim = float(D[0][0])
-            idx = int(I[0][0])
-            if idx < 0:
-                return None
-            return self.ids[idx], sim
-        else:
-            if self.gallery.shape[0] == 0:
-                return None
-            sims = (self.gallery @ vec[0])  # (N,)
-            idx = int(np.argmax(sims))
-            sim = float(sims[idx])
-            return self.ids[idx], sim
+        if self.index.ntotal == 0:
+            return None
+        D, I = self.index.search(vec, topk)
+        sim = float(D[0][0])
+        idx = int(I[0][0])
+        if idx < 0:
+            return None
+        return self.ids[idx], sim
 
 class FaceRecognizer:
     """ONNX embedding + FAISS DB wrapper."""
@@ -229,17 +214,48 @@ class HailoInferProc(Process):
         scale, zp = self.out_qp.get(name, (1.0, 0.0))
         return (arr.astype(np.float32) - zp) * scale
     
-    # Xem shape input tu opencv, chuyen lai cho dung NHWC, va resize dung shape dau vao
     def _prep(self, face_rgb: np.ndarray, expected_shape) -> np.ndarray:
         """
-        Trả về buffer đúng y 'expected_shape' của infer_model.input(name).shape
-        và đúng dtype (uint8/float32...). Không tự động thêm batch khi không có.
+        Return a contiguous NHWC uint8 buffer that matches expected_shape.
+        Supports expected_shape being either (H,W,C) or (N,H,W,C)/(H,W,C,N) with N in {0,1}.
         """
         es = tuple(int(x) for x in expected_shape)
+        # Extract H, W, C robustly
+        if len(es) == 3:
+            H, W, C = es
+        elif len(es) == 4:
+            # Assume batch dimension present; take the last 3 dims as HWC if plausible
+            # Common Hailo NHWC: (N,H,W,C). Guard for (H,W,C,N) as well.
+            if es[0] in (0, 1) and es[1] > 0 and es[2] > 0 and es[3] in (1, 3):
+                H, W, C = es[1], es[2], es[3]
+            elif es[3] in (0, 1) and es[0] > 0 and es[1] > 0 and es[2] in (1, 3):
+                H, W, C = es[0], es[1], es[2]
+            else:
+                # Fallback: last 3 dims
+                H, W, C = es[-3], es[-2], es[-1]
+        else:
+            raise ValueError(f"Unsupported input shape: {es}")
 
-        H, W, C = es
-        img = cv2.resize(face_rgb, (W, H), interpolation=cv2.INTER_LINEAR)
-        return img.astype(np.uint8)
+        # Sanity fallback for invalid dims
+        if H <= 0 or W <= 0 or C not in (1, 3):
+            raise ValueError(f"Bad expected input dims: {es}")
+
+        # Resize and convert to needed channels
+        img = face_rgb
+        if img.ndim == 2:
+            img = img[..., None]
+        if img.shape[2] == 3 and C == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)[..., None]
+        elif img.shape[2] == 1 and C == 3:
+            img = np.repeat(img, 3, axis=2)
+        img = cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)
+
+        out = np.ascontiguousarray(img, dtype=np.uint8)
+        # Final guard — ensure size matches
+        if out.size != (H * W * C):
+            # Return an empty array to indicate failure; caller will handle
+            return np.empty((0,), dtype=np.uint8)
+        return out
 
     def _postprocess(self, out_arrs):
         """Best-effort postprocess for demo; adjust to your HEF's real outputs.
@@ -324,15 +340,35 @@ class HailoInferProc(Process):
                     bindings = cmodel.create_bindings()
 
                     # Inputs
+                    bad_input = False
                     for n in input_names:
                         in_shape = io_shape(infer_model, True, n)
                         in_buf   = self._prep(face, in_shape)
+                        # Validate buffer
+                        try:
+                            es = tuple(int(x) for x in in_shape)
+                            if len(es) == 3:
+                                exp_elems = es[0]*es[1]*es[2]
+                            elif len(es) == 4:
+                                exp_elems = es[-3]*es[-2]*es[-1]
+                            else:
+                                exp_elems = 0
+                        except Exception:
+                            exp_elems = 0
+                        if in_buf.size != exp_elems:
+                            print(f"[{self.model_type}] bad input buffer for '{n}': got {in_buf.size} elems, expect {exp_elems} from shape {in_shape}")
+                            bad_input = True
+                            break
                         bindings_set_buffer(bindings, True, n, in_buf)
+
+                    if bad_input:
+                        continue
 
                     # Outputs
                     for n in output_names:
                         out_shape = io_shape(infer_model, False, n)
-                        out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
+                        # Most Hailo post-quant outputs are u8; keep u8 then dequantize
+                        out_buf   = np.zeros(tuple(int(x) for x in out_shape), dtype=np.uint8)
                         bindings_set_buffer(bindings, False, n, out_buf)
                         
                     try:
@@ -628,6 +664,11 @@ class DetectWorker(Process):
                                 ver2 = self.shared["face_ver"]
                                 if face_rgb2 is not None and ver2 != last_recog_ver:
                                     try:
+                                        # last-wins: drop stale item if queue full
+                                        try:
+                                            self._recog_q.get_nowait()
+                                        except tqueue.Empty:
+                                            pass
                                         self._recog_q.put_nowait(face_rgb2.copy())
                                         last_recog_ver = ver2
                                     except tqueue.Full:
