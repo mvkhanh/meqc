@@ -350,8 +350,9 @@ class HailoInferProc(Process):
             }
         
         else:  # agegender
+            AGE_CLASS_OFFSET = 3
             g = np.asarray(out_arrs[2]).squeeze()
-            age_raw = float(np.asarray(out_arrs[1]).squeeze())
+            # age_raw = float(np.asarray(out_arrs[1]).squeeze())
             # prob_female = 1.0 / (1.0 + np.exp(-g))
             
             probs = _softmax(g)
@@ -362,7 +363,14 @@ class HailoInferProc(Process):
             else:
                 gender_label = "Male"
                 gender_conf = 1.0 - prob_female
-            age_years = float(np.clip(age_raw, 0, 100))
+            age_class_logits = np.asarray(out_arrs[0])
+            age_reg_output = np.asarray(out_arrs[1])
+            pred_age_reg = age_reg_output.item()
+            pred_remapped_class = np.argmax(age_class_logits, axis=1)[0]
+            pred_original_class = pred_remapped_class + AGE_CLASS_OFFSET
+            age_years = (pred_original_class * 5) + pred_age_reg
+
+            # age_years = float(np.clip(age_raw, 0, 100))
 
             return {"age": age_years, "gender": gender_label, "gender_conf": gender_conf}
 
