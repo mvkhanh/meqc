@@ -336,7 +336,7 @@ class HailoInferProc(Process):
         
         elif self.model_type == 'gaze':
             out_arrs = np.asarray(out_arrs)
-            EYE_CONTACT_THRESH_DEG = 20.0
+            EYE_CONTACT_THRESH_DEG = 30.0
             pitch_logits = out_arrs[0]
             yaw_logits = out_arrs[1]
             yaw_deg, pitch_deg = HailoInferProc.decode_gaze3Gaze_bins(pitch_logits, yaw_logits)
