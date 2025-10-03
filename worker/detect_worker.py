@@ -394,7 +394,7 @@ class HailoInferProc(Process):
 
             with infer_model.configure() as cmodel:
                 while True:
-                    t1 = time()
+                    # t1 = time()
                     face = self.in_q.get()
                     if face is None:
                         break
@@ -430,7 +430,7 @@ class HailoInferProc(Process):
                     # Cast sang float32 trong postprocess nếu cần:
                     result = self._postprocess(out_deq)
                     self.out_q.put(result)
-                    print(f'{self.model_type} inference time: {time() - t1}s')
+                    # print(f'{self.model_type} inference time: {time() - t1}s')
 
 class DetectWorker(Process):
     """
