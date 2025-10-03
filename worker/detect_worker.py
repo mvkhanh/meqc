@@ -731,8 +731,8 @@ class DetectWorker(Process):
             # Always draw overlay from shared results
             out = self._draw_overlay(frame_bgr)
             t1 = time()
-            # if t1 > t0:
-            #     print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
+            if t1 > t0:
+                print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
             submit(self.out_q, out)
             self.frame_idx += 1
 
