@@ -72,12 +72,14 @@ class _FaissDB:
     """Minimal FAISS-backed DB with cosine similarity (via inner product on L2-normalized vectors).
     Falls back to NumPy if faiss is unavailable.
     """
+    FAISS_NAME = 'faiss.index'
+    METADATA_NAME = 'metadata.json'
     @classmethod
     def load(cls, path: str):
         """Load FAISS index and metadata saved by `save`.
         """
-        idx = faiss.read_index(path + "faiss.index")
-        with open(path + "metadata.json", "r") as f:
+        idx = faiss.read_index(path + _FaissDB.FAISS_NAME)
+        with open(path + _FaissDB.METADATA_NAME, "r") as f:
             meta = json.load(f)
         dim = int(meta.get("dim", idx.d))
         obj = cls(dim)
@@ -90,14 +92,14 @@ class _FaissDB:
         """Persist FAISS index and metadata.
         Writes two files: `{path}.index` (FAISS) and `{path}.json` (ids/next_id/meta).
         """
-        faiss.write_index(self.index, path + "faiss.index")
+        faiss.write_index(self.index, path + _FaissDB.FAISS_NAME)
         meta = {
             "ids": self.ids,
             "next_id": self.next_id,
             "dim": self.dim,
             "ntotal": int(self.index.ntotal),
         }
-        with open(path + "metadata.json", "w") as f:
+        with open(path + _FaissDB.METADATA_NAME, "w") as f:
             json.dump(meta, f)
             
     def __init__(self, dim: int):
@@ -142,9 +144,9 @@ class FaceRecognizer:
         ])
         # Try to load existing DB if provided
         self.db = None  # type: Optional[_FaissDB]
-        if self.db_path and os.path.exists(self.db_path + ".index") and os.path.exists(self.db_path + ".json"):
+        if self.db_path and os.path.exists(self.db_path + _FaissDB.FAISS_NAME) and os.path.exists(self.db_path + _FaissDB.METADATA_NAME):
             try:
-                self.db = _FaissDB.load(self.db_path)
+                self.db = _FaissDB.load(os.path.join(self.db_path, _FaissDB.FAISS_NAME))
                 print(f"[recog] loaded FAISS DB: {self.db_path} (ntotal={self.db.index.ntotal})")
             except Exception as e:
                 print(f"[recog] failed to load DB '{self.db_path}': {e}")
