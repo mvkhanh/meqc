@@ -75,10 +75,9 @@ class _FaissDB:
     @classmethod
     def load(cls, path: str):
         """Load FAISS index and metadata saved by `save`.
-        Expects two files: `{path}.index` and `{path}.json`.
         """
-        idx = faiss.read_index(path + ".index")
-        with open(path + ".json", "r") as f:
+        idx = faiss.read_index(path + "faiss.index")
+        with open(path + "metadata.json", "r") as f:
             meta = json.load(f)
         dim = int(meta.get("dim", idx.d))
         obj = cls(dim)
