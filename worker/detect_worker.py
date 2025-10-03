@@ -144,11 +144,9 @@ class FaceRecognizer:
         ])
         # Try to load existing DB if provided
         self.db = None  # type: Optional[_FaissDB]
-        if self.db_path and os.path.exists(self.db_path + _FaissDB.FAISS_NAME) and os.path.exists(self.db_path + _FaissDB.METADATA_NAME):
+        if self.db_path and os.path.exists(self.db_path):
             try:
-                print(self.db_path)
-                print(_FaissDB.FAISS_NAME)
-                self.db = _FaissDB.load(os.path.join(self.db_path, _FaissDB.FAISS_NAME))
+                self.db = _FaissDB.load(self.db_path)
                 print(f"[recog] loaded FAISS DB: {self.db_path} (ntotal={self.db.index.ntotal})")
             except Exception as e:
                 print(f"[recog] failed to load DB '{self.db_path}': {e}")
