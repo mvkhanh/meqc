@@ -194,13 +194,13 @@ class FaceRecognizer:
 
 class RecogThread(Thread):
     """Thread that consumes face crops and updates shared state with person_id."""
-    def __init__(self, in_q: tqueue.Queue, shared: dict, stop_event,
+    def __init__(self, in_q: tqueue.Queue, shared: dict,
                  onnx_path: str, sim_thres: float = 0.45, db_path: Optional[str] = None, autosave: bool = True,
                  images_dir: Optional[str] = None):
         super().__init__(daemon=True)
         self.in_q = in_q
         self.shared = shared
-        self.stop_event = stop_event
+        self.stop_event = Event()
         self.recog = FaceRecognizer(onnx_path, sim_thres, db_path=db_path, autosave=autosave)
         self.images_dir = images_dir or os.path.join("db", "images")
         os.makedirs(self.images_dir, exist_ok=True)
@@ -243,6 +243,9 @@ class RecogThread(Thread):
             except Exception as e:
                 # best-effort; keep thread alive
                 print(f"[recog] error: {e}")
+                
+    def stop(self):
+        self.stop_event.set()
 
 class HailoInferProc(Process):
     """
@@ -767,6 +770,7 @@ class DetectWorker(Process):
             pass
         try:
             if self._recog_thr is not None:
+                self._recog_thr.stop()
                 self._recog_thr.join(timeout=0.5)
         except Exception:
             pass
