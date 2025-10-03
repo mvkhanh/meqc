@@ -367,7 +367,7 @@ class HailoInferProc(Process):
             age_class_logits = np.asarray(out_arrs[0])
             age_reg_output = np.asarray(out_arrs[1])
             pred_age_reg = age_reg_output.item()
-            pred_remapped_class = np.argmax(age_class_logits, axis=1)[0]
+            pred_remapped_class = np.argmax(age_class_logits)
             pred_original_class = pred_remapped_class + AGE_CLASS_OFFSET
             age_years = (pred_original_class * 5) + pred_age_reg
 
