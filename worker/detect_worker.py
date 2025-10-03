@@ -154,8 +154,12 @@ class FaceRecognizer:
     def _preprocess(self, face_rgb: np.ndarray) -> np.ndarray:
         # align.get_aligned_face may accept PIL or ndarray
         img = Image.fromarray(face_rgb) if not isinstance(face_rgb, Image.Image) else face_rgb
-        aligned = align.get_aligned_face(img)
-
+        try:
+            aligned = align.get_aligned_face(img)
+        except Exception as e:
+            print(f'Align error: {e}')
+            aligned = img
+        print(aligned.size)
         x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
         return np.ascontiguousarray(x)
 
@@ -404,9 +408,16 @@ class HailoInferProc(Process):
                         out_buf   = np.empty(tuple(int(x) for x in out_shape), dtype=np.uint8)
                         bindings_set_buffer(bindings, False, n, out_buf)
 
-                    cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
+                    try:
+                        cmodel.wait_for_async_ready(timeout_ms=self.timeout_ms)
+                    except Exception as e:
+                        print(f'{self.model_type} cmodel error: {e}')
+                    
                     job = cmodel.run_async([bindings], partial(self._cb, bindings=bindings))
-                    job.wait(self.timeout_ms)
+                    try:
+                        job.wait(self.timeout_ms)
+                    except Exception as e:
+                        print(f'{self.model_type} job error: {e}')
 
                     out_raw = [bindings_get_buffer(bindings, n) for n in output_names]
                     out_deq = [self._dequant_output(n, arr) for n, arr in zip(output_names, out_raw)]
