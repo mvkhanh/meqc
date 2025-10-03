@@ -158,7 +158,7 @@ class FaceRecognizer:
         except Exception as e:
             print(f'Align error: {e}')
             aligned = img
-        print(aligned.size)
+
         x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
         return np.ascontiguousarray(x)
 
@@ -702,7 +702,7 @@ class DetectWorker(Process):
                             self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
                             self.shared["result"]["ts"] = now
                             # If eye contact detected, enqueue latest face for recognition (dedupe by face_ver)
-                            if self._recog_q is not None:
+                            if self._recog_q is not None and ec:
                                 face_rgb2 = self.shared["latest_face"]
                                 ver2 = self.shared["face_ver"]
                                 if face_rgb2 is not None and ver2 != last_recog_ver:
@@ -711,6 +711,8 @@ class DetectWorker(Process):
                                         last_recog_ver = ver2
                                     except tqueue.Full:
                                         pass
+                            else:
+                                self.shared["result"]["person_id"] = None
             except Empty:
                 pass
 
