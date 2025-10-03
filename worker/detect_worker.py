@@ -72,15 +72,16 @@ class _FaissDB:
         """Persist FAISS index and metadata.
         Writes two files: `{path}.index` (FAISS) and `{path}.json` (ids/next_id/meta).
         """
-        faiss.write_index(self.index, path + ".index")
+        faiss.write_index(self.index, path + "faiss.index")
         meta = {
             "ids": self.ids,
             "next_id": self.next_id,
             "dim": self.dim,
             "ntotal": int(self.index.ntotal),
         }
-        with open(path + ".json", "w") as f:
+        with open(path + "metadata.json", "w") as f:
             json.dump(meta, f)
+            
     def __init__(self, dim: int):
         self.dim = dim
         self.ids = []  # index -> person_id
@@ -401,7 +402,7 @@ class DetectWorker(Process):
         self.frame_idx = 0
         self._stop = Event()
 
-        # Shared state inside this process
+        # Shared state insiqde this process
         self.shared = None
 
         # IPC queues to Hailo processes
