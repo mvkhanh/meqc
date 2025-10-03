@@ -41,7 +41,7 @@ def main(args):
     if args.server:
         sender = create_sender(args.server, args.port)
         consecutive_fail = 0
-        MAX_FAILS = 3  # quÃ¡ 3 láº§n lá»i liÃªn tiáº¿p thÃ¬ dá»«ng
+        MAX_FAILS = 3
         
     else:
         cv2.namedWindow('Streaming', cv2.WINDOW_NORMAL)
@@ -145,8 +145,8 @@ if __name__ == "__main__":
     parser.add_argument("--server", default="", help="IP/host cua PC server, bo trong de hien thi local")
     parser.add_argument("--port", type=int, default=9009)
     parser.add_argument("--name", default="pi")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=640)
     parser.add_argument("--den", type=int, default=3, help="detect_every_n")
     parser.add_argument("--quality", type=int, default=80, help='Image quality when send to server')
     parser.add_argument("--face-thres", type=float, default=0.8, help='Threshold for face detection')
