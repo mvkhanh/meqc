@@ -607,7 +607,7 @@ class DetectWorker(Process):
             self._recog_thr.start()
             print("[recog] Face recognition thread started")
             if self.recog_db_path:
-                print(f"[recog] DB path: {self.recog_db_path}.index/.json")
+                print(f"[recog] DB path: {self.recog_db_path}")
         else:
             print(f"[recog] disabled (onnx not found: {self.recog_onnx_path})")
 
