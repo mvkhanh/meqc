@@ -3,4 +3,3 @@ ckpt/
 .DS_Store
 *.ipynb
 db/
-*.html
