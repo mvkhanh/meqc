@@ -55,7 +55,8 @@ def main(args):
                                  face_score_thres=args.face_thres, agegender_path=args.agegender_model,
                                  width=args.width, height=args.height, in_q=in_q, out_q=out_q,
                                  emotion_path=args.emotion_model, gaze_path=args.gaze_model,
-                                 recog_onnx_path=args.face_recognition_model, recog_db_path=args.recog_db_path)
+                                 recog_onnx_path=args.face_recognition_model, recog_db_path=args.recog_db_path,
+                                 )
     
     capture_worker.start()
     detect_worker.start()
@@ -142,9 +143,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Raspberry Pi 5 Realtime Client")
     
-    parser.add_argument("--server", default="", help="IP/host cua PC server, bo trong de hien thi local")
-    parser.add_argument("--port", type=int, default=9009)
-    parser.add_argument("--name", default="pi")
+    parser.add_argument("--server", default="192.168.1.243", help="IP/host cua PC server, bo trong de hien thi local")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--device-id", default="pi-0")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=640)
     parser.add_argument("--den", type=int, default=3, help="detect_every_n")

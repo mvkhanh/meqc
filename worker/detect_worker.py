@@ -17,7 +17,10 @@ from torchvision import transforms
 from face_alignment import align
 import faiss
 import queue as tqueue
+
 from PIL import Image
+import requests
+import base64
 
 
 # ---------- Helpers ----------
@@ -66,6 +69,25 @@ def _save_webp_image(rgb: np.ndarray, out_path: str, quality: int = 80):
         raise RuntimeError("encode webp failed")
     with open(out_path, "wb") as f:
         f.write(buf.tobytes())
+
+# --- Helper: Encode RGB/grayscale image to WebP base64 ---
+def _encode_webp_base64(rgb: np.ndarray, size=(112, 112), quality: int = 80) -> str:
+    """
+    Mã hoá ảnh RGB/grayscale thành WebP (resize về 112x112 mặc định) và trả về base64 string.
+    """
+    if rgb is None:
+        return None
+    # Đảm bảo có 3 kênh BGR cho OpenCV
+    if rgb.ndim == 2:
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    # Resize về kích thước yêu cầu
+    bgr = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".webp", bgr, [cv2.IMWRITE_WEBP_QUALITY, int(quality)])
+    if not ok:
+        raise RuntimeError("encode webp failed")
+    return base64.b64encode(buf).decode("ascii")
 
 # -------------------- Face Recognition (ONNX + FAISS) --------------------
 class _FaissDB:
@@ -213,36 +235,65 @@ class RecogThread(Thread):
                 continue
             if item is None:
                 break
+            pid, sim, is_new = self.recog.identify_or_enroll(item)
+            # Lưu một ảnh WebP/ID nếu chưa tồn tại
             try:
-                pid, sim, is_new = self.recog.identify_or_enroll(item)
-                # Lưu một ảnh WebP/ID nếu chưa tồn tại
-                try:
-                    out_path = os.path.join(self.images_dir, f"{int(pid)}.webp")
-                    if not os.path.exists(out_path):
-                        # Cố gắng dùng ảnh đã align; nếu lỗi thì dùng ảnh gốc
-                        try:
-                            pil_img = Image.fromarray(item) if not isinstance(item, Image.Image) else item
-                            aligned = align.get_aligned_face(pil_img)
-                            arr = np.array(aligned)
-                        except Exception:
-                            arr = item  # dùng ảnh crop RGB gốc
-                        # Bảo đảm là RGB hoặc gray trước khi lưu
-                        if arr.ndim == 3 and arr.shape[2] == 3:
-                            arr_rgb = arr
-                        elif arr.ndim == 2:
-                            arr_rgb = arr
-                        else:
-                            # Trường hợp lạ: cố gắng chuyển về RGB
-                            arr_rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-                        _save_webp_image(arr_rgb, out_path, quality=80)
-                except Exception as e:
-                    print(f"[recog] warn: failed to save face image for ID#{pid}: {e}")
-                with self.shared["lock"]:
-                    self.shared["result"]["person_id"] = int(pid)
-                    self.shared["result"]["ts"] = time()
+                out_path = os.path.join(self.images_dir, f"{int(pid)}.webp")
+                if not os.path.exists(out_path):
+                    # Cố gắng dùng ảnh đã align; nếu lỗi thì dùng ảnh gốc
+                    try:
+                        pil_img = Image.fromarray(item) if not isinstance(item, Image.Image) else item
+                        aligned = align.get_aligned_face(pil_img)
+                        arr = np.array(aligned)
+                    except Exception:
+                        arr = item  # dùng ảnh crop RGB gốc
+                    # Bảo đảm là RGB hoặc gray trước khi lưu
+                    if arr.ndim == 3 and arr.shape[2] == 3:
+                        arr_rgb = arr
+                    elif arr.ndim == 2:
+                        arr_rgb = arr
+                    else:
+                        # Trường hợp lạ: cố gắng chuyển về RGB
+                        arr_rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                    _save_webp_image(arr_rgb, out_path, quality=80)
             except Exception as e:
-                # best-effort; keep thread alive
-                print(f"[recog] error: {e}")
+                print(f"[recog] warn: failed to save face image for ID#{pid}: {e}")
+            with self.shared["lock"]:
+                self.shared["result"]["person_id"] = int(pid)
+                self.shared["result"]["is_new"] = bool(is_new)
+                self.shared["result"]["ts"] = time()
+# --- Event sender thread ---
+
+
+# Thread gửi payload JSON lên server FastAPI khi đủ điều kiện (nhìn >= 3s).
+# Dùng queue để không block DetectWorker loop.
+class EventSenderThread(Thread):
+    """
+    Thread gửi payload JSON lên server FastAPI khi đủ điều kiện (nhìn &gt;= 3s).
+    Dùng queue để không block DetectWorker loop.
+    """
+    def __init__(self, in_q: tqueue.Queue, server_url: str):
+        super().__init__(daemon=True)
+        self.in_q = in_q
+        self.server_url = server_url
+        self._stop = Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                item = self.in_q.get(timeout=0.1)
+            except tqueue.Empty:
+                continue
+            if item is None:
+                break
+            try:
+                r = requests.post(self.server_url, json=item, timeout=3)
+                # Có thể log r.status_code nếu cần
+            except Exception as e:
+                print(f"[sender] post error: {e}")
 
 class HailoInferProc(Process):
     """
@@ -450,7 +501,7 @@ class DetectWorker(Process):
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
                                   in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None,
                  recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45,
-                 recog_db_path: Optional[str] = None):
+                 recog_db_path: Optional[str] = None, server_ip=None, server_port=None, device_id=None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
         self.detector = None
@@ -490,6 +541,12 @@ class DetectWorker(Process):
         self._recog_q = None  # thread queue
         self._recog_thr = None
         self._last_recog_ver = -1
+
+        # ---- Server config / sender queue ----
+        self.server_url = f"http://{server_ip}:{server_port}/api/"
+        self.device_id = device_id
+        self._sender_q = None
+        self._sender_thr = None
 
 
     # -------------------- Helper --------------------
@@ -579,12 +636,20 @@ class DetectWorker(Process):
                 "eye_contact": None,
                 "eye_contact_dwell": 0.0,
                 "person_id": None,
+                "is_new": None,
+                "event_fired": False,
             },
             "eye_on_since": 0.0,
         }
 
         self.detector = YuNetFaceDetector(model_path=self.detector_path, face_score_thres=self.face_score_thres,
                                           width=self.width, height=self.height)
+
+        # Start sender thread (non-blocking HTTP poster)
+        self._sender_q = tqueue.Queue(maxsize=1)
+        self._sender_thr = EventSenderThread(self._sender_q, self.server_url)
+        self._sender_thr.start()
+        print(f"[sender] Event sender → {self.server_url} (device_id={self.device_id})")
 
         # Spawn Hailo subprocesses (one per model) with a shared group id so they share the same Hailo8
         GROUP_ID = "SHARED"  # can be parameterized
@@ -699,9 +764,9 @@ class DetectWorker(Process):
             try:
                 if self._gaze_out is not None:
                     res = self._gaze_out.get_nowait()
-                    now = time()
                     if isinstance(res, dict):
                         with self.shared["lock"]:
+                            now = time()
                             ec = bool(res.get("eye_contact", False))
                             if ec:
                                 if not self.shared.get("eye_on_since"):
@@ -710,20 +775,65 @@ class DetectWorker(Process):
                             else:
                                 self.shared["eye_on_since"] = 0.0
                                 dwell = 0.0
+                                # reset latch để lần nhìn sau có thể gửi tiếp
+                                self.shared["result"]["event_fired"] = False
+
                             self.shared["result"]["eye_contact"] = ec
                             self.shared["result"]["eye_contact_dwell"] = float(max(0.0, dwell))
                             self.shared["result"]["ts"] = now
-                            # If eye contact detected, enqueue latest face for recognition (dedupe by face_ver)
-                            if self._recog_q is not None and ec:
+
+                            # Nếu đang eye contact và vượt ngưỡng 3.0s, bắn event 1 lần
+                            if ec and dwell >= 3.0 and not self.shared["result"]["event_fired"]:
+                                # Lấy snapshot metadata
+                                pid = self.shared["result"]["person_id"]
+                                is_new = bool(self.shared["result"].get("is_new") or False)
+                                age_val = self.shared["result"]["age"]
+                                gender_val = self.shared["result"]["gender"]
+                                emotion_val = self.shared["result"]["emotion"]
+                                face_rgb2 = self.shared["latest_face"]
+
+                                # Chuẩn hoá giá trị gửi
+                                gender_api = (gender_val.lower() if isinstance(gender_val, str) else None)
+                                age_api = int(round(age_val)) if isinstance(age_val, (int, float)) else None
+                                person_id_api = (str(pid) if pid is not None else None)
+
+                                # Ảnh webp base64 nếu là người mới
+                                face_b64 = None
+                                if is_new and face_rgb2 is not None:
+                                    try:
+                                        face_b64 = _encode_webp_base64(face_rgb2, size=(112, 112), quality=80)
+                                    except Exception as e:
+                                        print(f"[sender] encode face webp failed: {e}")
+
+                                payload = {
+                                    "device_id": self.device_id,
+                                    "gaze_seconds": float(dwell),
+                                    "is_new": bool(is_new),
+                                    "age": age_api,
+                                    "gender": gender_api,
+                                    "emotion": emotion_val,
+                                    "person_id": person_id_api,
+                                    "face_b64": face_b64,
+                                    "extra": {"source": "detect_worker"}
+                                }
+                                try:
+                                    self._sender_q.put_nowait(payload)
+                                    self.shared["result"]["event_fired"] = True
+                                except tqueue.Full:
+                                    print("[sender] queue full; drop event")
+                        # enqueue nhận diện như cũ
+                        if self._recog_q is not None and self.shared["result"]["eye_contact"]:
+                            with self.shared["lock"]:
                                 face_rgb2 = self.shared["latest_face"]
                                 ver2 = self.shared["face_ver"]
-                                if face_rgb2 is not None and ver2 != last_recog_ver:
-                                    try:
-                                        self._recog_q.put_nowait(face_rgb2.copy())
-                                        last_recog_ver = ver2
-                                    except tqueue.Full:
-                                        pass
-                            else:
+                            if face_rgb2 is not None and ver2 != last_recog_ver:
+                                try:
+                                    self._recog_q.put_nowait(face_rgb2.copy())
+                                    last_recog_ver = ver2
+                                except tqueue.Full:
+                                    pass
+                        else:
+                            with self.shared["lock"]:
                                 self.shared["result"]["person_id"] = None
             except Empty:
                 pass
@@ -779,6 +889,17 @@ class DetectWorker(Process):
         except Exception:
             if self._recog_thr.is_alive():
                 self._recog_thr.stop()
+            pass
+        # Stop sender thread
+        try:
+            if self._sender_q is not None:
+                self._sender_q.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            if self._sender_thr is not None:
+                self._sender_thr.join(timeout=0.5)
+        except Exception:
             pass
 
 
