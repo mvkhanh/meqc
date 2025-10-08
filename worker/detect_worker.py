@@ -236,6 +236,10 @@ class RecogThread(Thread):
             if item is None:
                 break
             pid, sim, is_new = self.recog.identify_or_enroll(item)
+            with self.shared["lock"]:
+                self.shared["result"]["person_id"] = int(pid)
+                self.shared["result"]["is_new"] = bool(is_new)
+                self.shared["result"]["ts"] = time()
             # Lưu một ảnh WebP/ID nếu chưa tồn tại
             try:
                 out_path = os.path.join(self.images_dir, f"{int(pid)}.webp")
@@ -258,10 +262,7 @@ class RecogThread(Thread):
                     _save_webp_image(arr_rgb, out_path, quality=80)
             except Exception as e:
                 print(f"[recog] warn: failed to save face image for ID#{pid}: {e}")
-            with self.shared["lock"]:
-                self.shared["result"]["person_id"] = int(pid)
-                self.shared["result"]["is_new"] = bool(is_new)
-                self.shared["result"]["ts"] = time()
+            
 # --- Event sender thread ---
 
 
