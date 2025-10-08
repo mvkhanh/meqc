@@ -5,7 +5,7 @@ import os
 import cv2
 from multiprocessing import Process, Queue, Event
 from worker.detect_worker import DetectWorker
-from utils import submit, poll, create_sender
+from utils import submit, poll
 
 class CaptureWorker(Process):
     def __init__(self, in_q: Queue, width: int=640, height: int=640):
@@ -38,15 +38,9 @@ def _check_quit_key():
     return k in (27, ord('q'), ord('Q'))
 
 def main(args):
-    if args.server:
-        sender = create_sender(args.server, args.port)
-        consecutive_fail = 0
-        MAX_FAILS = 3
-        
-    else:
-        cv2.namedWindow('Streaming', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Streaming', width=args.width, height=args.height)
-    
+    cv2.namedWindow('Streaming', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Streaming', width=args.width, height=args.height)
+
     in_q = Queue(maxsize=1)
     out_q = Queue(maxsize=1)
     os.makedirs(args.recog_db_path, exist_ok=True)
@@ -75,49 +69,14 @@ def main(args):
                 continue
 
             # ĐÃ có frame -> gửi hoặc hiển thị
-            if args.server:
-                ok, tmp = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), args.quality])
-                jpg = tmp.tobytes() if ok else None
-                if jpg is None:
-                    continue
-
-                try:
-                    _ = sender.send_jpg(args.name, jpg)
-                    consecutive_fail = 0  # reset khi gửi OK
-                except Exception as e:
-                    consecutive_fail += 1
-                    print(f"[CLIENT] send_jpg failed ({consecutive_fail}/{MAX_FAILS}): {e}")
-                    if consecutive_fail >= MAX_FAILS:
-                        print("[CLIENT] Server unreachable. Stopping client.")
-                        break
-
-                    time.sleep(0.5)
-                    # Recreate socket
-                    try:
-                        sender.zmq_socket.close(0)
-                        sender.zmq_context.term()
-                    except Exception:
-                        pass
-                    sender = create_sender(args.server, args.port)
-            else:
-                cv2.imshow('Streaming', frame)
-                if _check_quit_key():
-                    break
+            cv2.imshow('Streaming', frame)
+            if _check_quit_key():
+                break
                     
     except KeyboardInterrupt:
         pass
     finally:
-        if args.server:
-            try:
-                sender.zmq_socket.close(0)
-            except Exception:
-                pass
-            try:
-                sender.zmq_context.term()
-            except Exception:
-                pass
-        else:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
         
         # Graceful shutdown of workers
         try:

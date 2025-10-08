@@ -18,16 +18,6 @@ def poll(out_q):
             last = out_q.get_nowait()
     except pyqueue.Empty:
         return last
-        
-def create_sender(ip, port):
-    sender = imagezmq.ImageSender(connect_to=f"tcp://{ip}:{port}", REQ_REP=True)
-    # cau hinh timeout cho REQ socket (ms)
-    sock = sender.zmq_socket
-    sock.setsockopt(zmq.LINGER, 0)           # khÃ´ng chá» khi close
-    sock.setsockopt(zmq.RCVTIMEO, 2000)      # 2s Äá»£i reply tá»« server
-    sock.setsockopt(zmq.SNDTIMEO, 2000)      # 2s Äá»£i gá»­i
-    print(f"[CLIENT] Connecting to tcp://{ip}:{port}")
-    return sender
 
 def _softmax(x: np.ndarray) -> np.ndarray:
         x = x.astype(np.float32)
