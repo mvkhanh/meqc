@@ -56,6 +56,7 @@ def main(args):
                                  width=args.width, height=args.height, in_q=in_q, out_q=out_q,
                                  emotion_path=args.emotion_model, gaze_path=args.gaze_model,
                                  recog_onnx_path=args.face_recognition_model, recog_db_path=args.recog_db_path,
+                                 server_ip=args.server, server_port=args.port, device_id=args.device_id
                                  )
     
     capture_worker.start()
