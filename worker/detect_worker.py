@@ -276,13 +276,13 @@ class EventSenderThread(Thread):
         super().__init__(daemon=True)
         self.in_q = in_q
         self.server_url = server_url
-        self._stop = Event()
+        self.stop_event = Event()
 
     def stop(self):
-        self._stop.set()
+        self.stop_event.set()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self.stop_event.is_set():
             try:
                 item = self.in_q.get(timeout=0.1)
             except tqueue.Empty:
