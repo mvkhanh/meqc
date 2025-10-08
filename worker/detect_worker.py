@@ -800,11 +800,10 @@ class DetectWorker(Process):
 
                                 # Ảnh webp base64 nếu là người mới
                                 face_b64 = None
-                                if is_new and face_rgb2 is not None:
-                                    try:
-                                        face_b64 = _encode_webp_base64(face_rgb2, size=(112, 112), quality=80)
-                                    except Exception as e:
-                                        print(f"[sender] encode face webp failed: {e}")
+                                try:
+                                    face_b64 = _encode_webp_base64(face_rgb2, size=(112, 112), quality=80)
+                                except Exception as e:
+                                    print(f"[sender] encode face webp failed: {e}")
 
                                 payload = {
                                     "device_id": self.device_id,
