@@ -182,7 +182,8 @@ class FaceRecognizer:
         except Exception as e:
             print(f'Align error: {e}')
             aligned = img
-
+        if aligned is None:
+            aligned = face_rgb
         x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
         return np.ascontiguousarray(x)
 
