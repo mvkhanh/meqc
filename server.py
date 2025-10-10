@@ -3,7 +3,7 @@ import argparse
 import time
 import cv2
 import threading
-from db.face_db import FaceDB
+from face_db import FaceDB
 from model.face_detector import HaarFaceDetector
 from model.face_recognizer import LBPHRecognizer
 from utils import enroll_from_camera, VideoSource

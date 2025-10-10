@@ -4,7 +4,7 @@ from torchvision import transforms
 import os
 import numpy as np
 from PIL import Image
-from db.face_db import _FaissDB
+from face_db import _FaissDB
 from face_alignment import align
 
 class FaceRecognizer:
