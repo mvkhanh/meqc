@@ -56,7 +56,7 @@ class FaceRecognizer:
             print(f'Align error: {e}')
             aligned = img
         if aligned is None:
-            aligned = face_rgb
+            aligned = img
         x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
         return np.ascontiguousarray(x)
 
