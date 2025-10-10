@@ -4,3 +4,5 @@ ckpt/
 *.ipynb
 db/
 report/
+*.jpg
+test.py
