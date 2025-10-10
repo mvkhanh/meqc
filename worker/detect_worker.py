@@ -157,11 +157,26 @@ class FaceRecognizer:
         self.sess = ort.InferenceSession(onnx_path, providers=list(providers))
         self.in_name = self.sess.get_inputs()[0].name
         self.out_names = [o.name for o in self.sess.get_outputs()]
+
+        # lấy kích thước input model
+        in0 = self.sess.get_inputs()[0]
+        self.in_shape = tuple(int(x) for x in (in0.shape or []))
+        self.is_nchw = (len(self.in_shape) == 4 and self.in_shape[1] in (1, 3))
+        if self.is_nchw:
+            self.exp_h, self.exp_w = int(self.in_shape[2]), int(self.in_shape[3])
+        else:
+            if len(self.in_shape) == 4:
+                self.exp_h, self.exp_w = int(self.in_shape[1]), int(self.in_shape[2])
+            else:
+                self.exp_h, self.exp_w = 112, 112
+
         self.sim_thres = float(sim_thres)
         self.db_path = db_path
         self.autosave = bool(autosave)
-        # preprocessing identical to PyTorch code
+
+        # ✅ thêm resize vào transform
         self.transform = transforms.Compose([
+            transforms.Resize((self.exp_h, self.exp_w)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
