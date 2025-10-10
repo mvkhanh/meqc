@@ -64,7 +64,8 @@ class RecogThread(Thread):
                         aligned = align.get_aligned_face(pil_img)
                         arr = np.array(aligned)
                     except Exception:
-                        arr = item  # dùng ảnh crop RGB gốc
+                        print(arr)
+                        arr = np.array(item)  # dùng ảnh crop RGB gốc
                     # Bảo đảm là RGB hoặc gray trước khi lưu
                     if arr.ndim == 3 and arr.shape[2] == 3:
                         arr_rgb = arr
