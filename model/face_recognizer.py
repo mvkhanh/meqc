@@ -7,6 +7,19 @@ from PIL import Image
 from face_db import _FaissDB
 from face_alignment import align
 
+# --- helpers ---
+def _ensure_pil_rgb(x):
+    if isinstance(x, Image.Image):
+        return x.convert("RGB")
+    if isinstance(x, np.ndarray):
+        arr = x
+        if arr.ndim == 2:  # gray -> 3 channels
+            arr = np.stack([arr] * 3, axis=-1)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return Image.fromarray(arr).convert("RGB")
+    raise TypeError(f"Unsupported image type: {type(x)}")
+
 class FaceRecognizer:
     """ONNX embedding + FAISS DB wrapper."""
     def __init__(self, onnx_path: str, sim_thres: float = 0.45,
@@ -48,16 +61,20 @@ class FaceRecognizer:
                 self.db = None
 
     def _preprocess(self, face_rgb: np.ndarray) -> np.ndarray:
-        # align.get_aligned_face may accept PIL or ndarray
-        img = Image.fromarray(face_rgb) if not isinstance(face_rgb, Image.Image) else face_rgb
+        # normalize input to PIL RGB
+        img = _ensure_pil_rgb(face_rgb)
         try:
             aligned = align.get_aligned_face(img)
         except Exception as e:
             print(f'Align error: {e}')
-            aligned = img
-        if aligned is None:
-            aligned = img
-        x = self.transform(aligned).unsqueeze(0).numpy().astype(np.float32)
+            aligned = None
+        # fallback to original if align returns None
+        aligned_pil = _ensure_pil_rgb(aligned) if aligned is not None else img
+        # torchvision transforms expect PIL or Tensor
+        x = self.transform(aligned_pil).unsqueeze(0).numpy().astype(np.float32)  # [B,C,H,W]
+        # if model expects NHWC, transpose accordingly
+        if not self.is_nchw and x.ndim == 4:
+            x = np.transpose(x, (0, 2, 3, 1))  # [B,H,W,C]
         return np.ascontiguousarray(x)
 
     def embed(self, face_rgb: np.ndarray) -> np.ndarray:

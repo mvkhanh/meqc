@@ -9,6 +9,19 @@ from face_alignment import align
 import numpy as np
 import cv2
 
+# --- Helpers to normalize image inputs ---
+def ensure_pil_rgb(x):
+    if isinstance(x, Image.Image):
+        return x.convert("RGB")
+    if isinstance(x, np.ndarray):
+        arr = x
+        if arr.ndim == 2:  # gray -> 3 channels
+            arr = np.stack([arr] * 3, axis=-1)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return Image.fromarray(arr).convert("RGB")
+    raise TypeError(f"Unsupported image type: {type(x)}")
+
 # --- Helper: Save RGB/grayscale face image as WebP with quality ---
 def _save_webp_image(rgb: np.ndarray, out_path: str, quality: int = 80):
     """
@@ -62,18 +75,13 @@ class RecogThread(Thread):
                     try:
                         pil_img = Image.fromarray(item) if not isinstance(item, Image.Image) else item
                         aligned = align.get_aligned_face(pil_img)
-                        arr = np.array(aligned)
+                        # Always end up with a valid PIL RGB image
+                        pil_aligned = ensure_pil_rgb(aligned) if aligned is not None else ensure_pil_rgb(pil_img)
+                        arr_rgb = np.array(pil_aligned, dtype=np.uint8)  # RGB uint8
                     except Exception:
-                        print(arr)
-                        arr = np.array(item)  # dùng ảnh crop RGB gốc
-                    # Bảo đảm là RGB hoặc gray trước khi lưu
-                    if arr.ndim == 3 and arr.shape[2] == 3:
-                        arr_rgb = arr
-                    elif arr.ndim == 2:
-                        arr_rgb = arr
-                    else:
-                        # Trường hợp lạ: cố gắng chuyển về RGB
-                        arr_rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                        # fallback to the original crop
+                        pil_fallback = ensure_pil_rgb(item)
+                        arr_rgb = np.array(pil_fallback, dtype=np.uint8)
                     _save_webp_image(arr_rgb, out_path, quality=80)
             except Exception as e:
                 print(f"[recog] warn: failed to save face image for ID#{pid}: {e}")
