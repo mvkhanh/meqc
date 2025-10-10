@@ -420,8 +420,8 @@ class DetectWorker(Process):
             if g_boxes is not None and len(g_boxes):
                 out = self.draw_dets(out, g_boxes, g_scores, g_clses)
             t1 = time()
-            if t1 > t0:
-                print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
+            # if t1 > t0:
+            #     print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
             submit(self.out_q, out)
             self.frame_idx += 1
 
