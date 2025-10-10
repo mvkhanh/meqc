@@ -469,6 +469,18 @@ class DetectWorker(Process):
             if self._recog_thr.is_alive():
                 self._recog_thr.stop()
             pass
+        try:
+            if self.gesture_q is not None:
+                self.gesture_q.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            if self.gesture_proc is not None:
+                self.gesture_proc.join(timeout=0.5)
+        except Exception:
+            if self.gesture_proc.is_alive():
+                self.gesture_proc.stop()
+            pass
         # Stop sender thread
         try:
             if self._sender_q is not None:
