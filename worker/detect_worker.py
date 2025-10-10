@@ -10,6 +10,7 @@ from utils import submit, poll, _softmax
 from time import time
 from threading import Lock, Thread
 from model.face_detector import YuNetFaceDetector
+from model.gesture_detector import GestureDetector
 from hailo_platform import VDevice, HailoSchedulingAlgorithm, HEF
 # -------------------- Face Recognition (ONNX + FAISS) --------------------
 import onnxruntime as ort
@@ -263,6 +264,30 @@ class RecogThread(Thread):
                     _save_webp_image(arr_rgb, out_path, quality=80)
             except Exception as e:
                 print(f"[recog] warn: failed to save face image for ID#{pid}: {e}")
+
+class GestureProcess(Thread):
+    """Thread that consumes face crops and updates shared state with person_id."""
+    def __init__(self, in_q: tqueue.Queue, shared: dict, stop_event,
+                 onnx_path: str):
+        super().__init__(daemon=True)
+        self.in_q = in_q
+        self.shared = shared
+        self.stop_event = stop_event
+        self.det = GestureDetector(onnx_path)
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                item = self.in_q.get(timeout=0.1)
+            except tqueue.Empty:
+                continue
+            if item is None:
+                break
+            boxes, scores, clses = self.det.detect(item)
+            with self.shared["lock"]:
+                self.shared["result"]["boxes"] = boxes
+                self.shared["result"]["scores"] = scores
+                self.shared["result"]["clses"] = clses
             
 # --- Event sender thread ---
 
@@ -503,7 +528,8 @@ class DetectWorker(Process):
     def __init__(self, detector_path, agegender_path, detect_every_n: int, face_score_thres=0.8, width=640, height=640,
                                   in_q: Optional[Queue] = None, out_q: Optional[Queue] = None, emotion_path: str = None, gaze_path: str = None,
                  recog_onnx_path: Optional[str] = None, recog_sim_thres: float = 0.45,
-                 recog_db_path: Optional[str] = None, server_ip=None, server_port=None, device_id=None):
+                 recog_db_path: Optional[str] = None, server_ip=None, server_port=None, device_id=None,
+                 gesture_path=None):
         super().__init__(daemon=False)
         self.detect_every_n = detect_every_n
         self.detector = None
@@ -544,6 +570,10 @@ class DetectWorker(Process):
         self._recog_thr = None
         self._last_recog_ver = -1
 
+        self.gesture_path = gesture_path
+        self.gesture_proc = None
+        self.gesture_q = None
+        
         # ---- Server config / sender queue ----
         self.server_url = f"http://{server_ip}:{server_port}/api/"
         self.device_id = device_id
@@ -619,6 +649,17 @@ class DetectWorker(Process):
             cv2.putText(frame_bgr, text, (x + pad, y - baseline - pad),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
         return frame_bgr
+    
+    def draw_dets(self, frame, boxes, scores, clses):
+        for (x1, y1, x2, y2), s, c in zip(boxes, scores, clses):
+            p1, p2 = (int(round(x1)), int(round(y1))), (int(round(x2)), int(round(y2)))
+            cv2.rectangle(frame, p1, p2, (0, 255, 0), 2)
+            label = f"{GestureDetector.CLASSES.get(int(c), str(int(c)))} {s:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            cv2.rectangle(frame, (p1[0], p1[1]-th-8), (p1[0]+tw+6, p1[1]), (0,255,0), -1)
+            cv2.putText(frame, label, (p1[0]+3, p1[1]-4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1, cv2.LINE_AA)
+        return frame
 
     # -------------------- Main process loop --------------------
     def run(self):
@@ -640,6 +681,9 @@ class DetectWorker(Process):
                 "person_id": None,
                 "is_new": None,
                 "event_fired": False,
+                "boxes": None,
+                "scores": None,
+                "clses": None
             },
             "eye_on_since": 0.0,
         }
@@ -690,6 +734,12 @@ class DetectWorker(Process):
         else:
             print(f"[recog] disabled (onnx not found: {self.recog_onnx_path})")
 
+        if self.gesture_path and os.path.exists(self.gesture_path):
+            self.gesture_q = tqueue.Queue(maxsize=1)
+            self.gesture_proc = GestureProcess(self.gesture_q, self.shared, self._stop, self.gesture_path)
+            self.gesture_proc.start()
+        else:
+            print(f"[gesture] onnx not found: {self.gesture_path}")
 
         # Track last face version submitted to each model
         last_ag_ver = -1
@@ -721,6 +771,7 @@ class DetectWorker(Process):
                 else:
                     with self.shared["lock"]:
                         self.shared["last_box"] = None
+                submit(self.gesture_q, frame_bgr)
 
             # Push latest face to subprocesses (only when face version changes) and pull results
             with self.shared["lock"]:
@@ -841,6 +892,12 @@ class DetectWorker(Process):
 
             # Always draw overlay from shared results
             out = self._draw_overlay(frame_bgr)
+            with self.shared["lock"]:
+                g_boxes = self.shared["result"].get("boxes")
+                g_scores = self.shared["result"].get("scores")
+                g_clses = self.shared["result"].get("clses")
+            if g_boxes is not None and len(g_boxes):
+                out = self.draw_dets(out, g_boxes, g_scores, g_clses)
             t1 = time()
             # if t1 > t0:
             #     print(f"FPS: {1.0 / (t1 - t0)} - Inference time: {t1 - t0}s")
