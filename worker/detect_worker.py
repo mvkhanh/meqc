@@ -160,7 +160,7 @@ class FaceRecognizer:
 
         # lấy kích thước input model
         in0 = self.sess.get_inputs()[0]
-        self.in_shape = tuple(int(x) for x in (in0.shape or []))
+        self.in_shape = tuple(x for x in (in0.shape or []))
         self.is_nchw = (len(self.in_shape) == 4 and self.in_shape[1] in (1, 3))
         if self.is_nchw:
             self.exp_h, self.exp_w = int(self.in_shape[2]), int(self.in_shape[3])
